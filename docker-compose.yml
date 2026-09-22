@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: blood-ops-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-blood_ops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-blood_ops}
+      POSTGRES_DB: ${POSTGRES_DB:-blood_ops}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - blood_ops_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-blood_ops} -d ${POSTGRES_DB:-blood_ops}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  blood_ops_pgdata:

@@ -1,0 +1,2 @@
+-- Phase 0 baseline: the schema intentionally defines no domain models yet.
+-- Domain tables are introduced in later phases via additive migrations.

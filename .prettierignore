@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+.opencode
+docs
+AGENTS.md
+MASTER_PROMPT.md
+README.md
+MANIFEST.sha256

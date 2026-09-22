@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  DISABLED
+}
+
+model User {
+  id               String     @id @default(uuid())
+  email            String     @unique
+  passwordHash     String
+  status           UserStatus @default(PENDING_VERIFICATION)
+  emailVerifiedAt  DateTime?
+  failedLoginCount Int        @default(0)
+  lockedUntilAt    DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  sessions              Session[]
+  emailVerificationTokens EmailVerificationToken[]
+  passwordResetTokens     PasswordResetToken[]
+  auditEvents            AuditEvent[]
+}
+
+model Session {
+  id               String    @id @default(uuid())
+  userId           String
+  tokenHash        String    @unique
+  csrfTokenHash    String
+  rotatedFromId    String?
+  createdAt        DateTime  @default(now())
+  lastUsedAt       DateTime  @default(now())
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  ipAddress        String?
+  userAgent        String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model AuditEvent {
+  id          String   @id @default(uuid())
+  actorUserId String?
+  action      String
+  targetType  String?
+  targetId    String?
+  requestId   String?
+  ipAddress   String?
+  userAgent   String?
+  metadata    Json?
+  occurredAt  DateTime @default(now())
+  prevHash    String?
+  hash        String
+
+  actorUser User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId])
+  @@index([action])
+  @@index([occurredAt])
+}

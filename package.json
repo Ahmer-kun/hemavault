@@ -1,0 +1,36 @@
+{
+  "name": "blood-ops",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run start:dev --workspace @blood-ops/api",
+    "dev:web": "npm run dev --workspace @blood-ops/web",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:unit": "npm run test:unit --workspaces --if-present",
+    "test:e2e": "npm run test:e2e --workspaces --if-present",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:migrate": "npm run prisma:migrate --workspace @blood-ops/api",
+    "db:generate": "npm run prisma:generate --workspace @blood-ops/api",
+    "db:seed": "npm run prisma:seed --workspace @blood-ops/api",
+    "db:studio": "npm run prisma:studio --workspace @blood-ops/api"
+  },
+  "devDependencies": {
+    "prettier": "^3.5.3",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "multer": "^2.3.0"
+  }
+}
