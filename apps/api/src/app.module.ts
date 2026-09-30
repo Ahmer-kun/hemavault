@@ -13,6 +13,14 @@ import { HealthModule } from './modules/health/health.module';
 import { MetaModule } from './modules/meta/meta.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { AuthGuard } from './modules/auth/presentation/auth.guard';
+import { RbacModule } from './modules/rbac/rbac.module';
+import { PermissionsGuard } from './modules/rbac/presentation/permissions.guard';
+import { OrganizationsModule } from './modules/organizations/organizations.module';
+import { FacilitiesModule } from './modules/facilities/facilities.module';
+import { UsersModule } from './modules/users/users.module';
+import { DonorsModule } from './modules/donors/donors.module';
+import { CampaignsModule } from './modules/campaigns/campaigns.module';
+import { DonationsModule } from './modules/donations/donations.module';
 
 @Module({
   imports: [
@@ -28,6 +36,13 @@ import { AuthGuard } from './modules/auth/presentation/auth.guard';
     HealthModule,
     MetaModule,
     AuthModule,
+    RbacModule,
+    OrganizationsModule,
+    FacilitiesModule,
+    UsersModule,
+    DonorsModule,
+    CampaignsModule,
+    DonationsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
@@ -38,6 +53,10 @@ import { AuthGuard } from './modules/auth/presentation/auth.guard';
     {
       provide: APP_GUARD,
       useClass: AuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: PermissionsGuard,
     },
     {
       provide: APP_PIPE,

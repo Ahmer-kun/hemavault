@@ -8,6 +8,8 @@ export interface AuditEventInput {
   action: string;
   targetType?: string | null;
   targetId?: string | null;
+  organizationId?: string | null;
+  facilityId?: string | null;
   requestId?: string | null;
   ipAddress?: string | null;
   userAgent?: string | null;
@@ -29,8 +31,7 @@ function canonicalize(metadata: Record<string, unknown> | null | undefined): str
 
 export function computeAuditHash(
   prevHash: string | null,
-  event: Omit<AuditEventInput, 'metadata' | 'requestId'> & {
-    requestId?: string | null;
+  event: Omit<AuditEventInput, 'metadata'> & {
     metadataSerialized: string | null;
     occurredAtIso: string;
   },
@@ -41,6 +42,8 @@ export function computeAuditHash(
     event.actorUserId ?? '',
     event.targetType ?? '',
     event.targetId ?? '',
+    event.organizationId ?? '',
+    event.facilityId ?? '',
     event.requestId ?? '',
     event.ipAddress ?? '',
     event.userAgent ?? '',
@@ -64,6 +67,8 @@ export class AuditService {
       actorUserId: input.actorUserId ?? null,
       targetType: input.targetType ?? null,
       targetId: input.targetId ?? null,
+      organizationId: input.organizationId ?? null,
+      facilityId: input.facilityId ?? null,
       requestId: input.requestId ?? null,
       ipAddress: input.ipAddress ?? null,
       userAgent: input.userAgent ?? null,
@@ -77,6 +82,8 @@ export class AuditService {
         action: input.action,
         targetType: input.targetType ?? null,
         targetId: input.targetId ?? null,
+        organizationId: input.organizationId ?? null,
+        facilityId: input.facilityId ?? null,
         requestId: input.requestId ?? null,
         ipAddress: input.ipAddress ?? null,
         userAgent: input.userAgent ?? null,

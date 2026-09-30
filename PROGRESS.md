@@ -58,28 +58,28 @@ Verified findings (2026-09-21):
 
 ## Phase 2 — Organizations + Facilities + RBAC
 
-- [ ] Organization entity implemented.
-- [ ] Facility entity implemented.
-- [ ] User identity/role model implemented.
-- [ ] Permission catalogue implemented.
-- [ ] Role/permission assignment implemented.
-- [ ] Facility scoping enforced.
-- [ ] Admin management flows implemented.
-- [ ] Authorization integration tests pass.
+- [x] Organization entity implemented.
+- [x] Facility entity implemented.
+- [x] User identity/role model implemented.
+- [x] Permission catalogue implemented.
+- [x] Role/permission assignment implemented.
+- [x] Facility scoping enforced.
+- [x] Admin management flows implemented.
+- [x] Authorization integration tests pass.
 
 ## Phase 3 — Donors + Donation Operations
 
-- [ ] Donor profile implemented with data minimization.
-- [ ] Donation appointment implemented.
-- [ ] Blood drive/campaign implemented.
-- [ ] Donor check-in implemented.
-- [ ] Donation collection record implemented.
-- [ ] Screening/quarantine workflow implemented.
-- [ ] Release/rejection workflow implemented.
-- [ ] Donation history implemented.
-- [ ] Donor self-service views implemented.
-- [ ] Operational donor-management views implemented.
-- [ ] Domain tests pass.
+- [x] Donor profile implemented with data minimization.
+- [x] Donation appointment implemented.
+- [x] Blood drive/campaign implemented.
+- [x] Donor check-in implemented.
+- [x] Donation collection record implemented.
+- [x] Screening/quarantine workflow implemented.
+- [x] Release/rejection workflow implemented.
+- [x] Donation history implemented.
+- [x] Donor self-service views implemented.
+- [x] Operational donor-management views implemented.
+- [x] Domain tests pass.
 
 ## Phase 4 — Inventory Engine
 
@@ -226,6 +226,109 @@ Known limitations: (1) Password policy length lives in env schema + DTO defaults
 Decision/ADR reference: ADR-025 (argon2id params), ADR-026 (DB sessions + CSRF synchronizer + rotation/revocation),
   ADR-027 (per-account+IP throttling + lockout), ADR-028 (PENDING→ACTIVE/DISABLED gated model + anti-enumeration),
   ADR-029 (hash-chained audit trail).
+```
+
+### Phase 2 entry
+
+```text
+Date: 2026-09-25
+Phase: Phase 2
+Change: Implemented Organizations + Facilities + RBAC. Migration `20260925065532_phase2_rbac` adds Permission, Role,
+  RolePermission, UserRole, Organization, Facility, FacilityMembership, RoleScope/status enums, User.name, and
+  AuditEvent.organizationId/facilityId (+ indexes). Single source of truth for the access-control catalogue:
+  src/modules/rbac/domain/permission-catalogue.ts (54 permissions, 7 roles, globalRoles()/facilityRoles()/
+  assertCatalogueIntegrity()); idempotent sync via access-control.seed.ts run by prisma/seed.ts and vitest
+  globalSetup (test/global-setup.ts). Authorization engine: pure policy module (canGlobally/canAnywhere/
+  canAtFacility/evaluatePermissions/isMemberOfFacility), RbacService.buildActorContext per request, global
+  PermissionsGuard registered AFTER AuthGuard that skips @Public routes, decorators RequirePermission/
+  RequireGlobal/RequireAnywhere/RequireFacilityScope + @CurrentActor, AuthenticatedRequest.actor. Modules:
+  organizations (create/list/get/update + audit; code normalized uppercase, P2002→409), facilities
+  (create/list/get/update + member add/remove/list; ACTIVE-org gate, facilityRoles() allowlist, unique
+  membership; resource scope: out-of-scope org/facility → 404 mask, guard miss → 403 FORBIDDEN), users
+  (me with memberships+effectivePermissions, profile name update, user list, global role assign/remove with
+  globalRoles() scope check, last-PLATFORM_SUPER_ADMIN removal blocked → 409 LAST_SUPER_ADMIN). Route guards:
+  org create/patch RequireGlobal organization.manage; org list/get RequireAnywhere organization.read; facility
+  create RequireGlobal [organization.manage|facility.manage] anyOf; facility get/patch RequireFacilityScope
+  facility.read/facility.manage; members list RequireFacilityScope [manage_members|read] anyOf; member
+  add/remove RequireFacilityScope facility.manage_members; users list/roles RequireGlobal user.read /
+  user.manage_roles. AuditService now records organizationId/facilityId and hashes them into the chain. New
+  AuditModule (shared provider). CsrfGuard added on all mutating endpoints. Fixed DTO code regexes to accept
+  mixed case (normalized to uppercase in service). vitest.config sets fileParallelism:false (e2e shares one
+  DB; suite cleanups must not race); rbac e2e uses its own email domain.
+Verification commands: npm run typecheck -w apps/api; npm run lint -w apps/api; npm run build -w apps/api;
+  npm run test:unit -w apps/api; npm run test:e2e -w apps/api; npx prisma validate
+Result: typecheck clean; eslint clean; nest build ok; prisma validate ok; unit 49/49 (policy engine, catalogue
+  integrity/super-admin rollup, audit hash incl. org/facility context, prior suites); e2e 43/43 = health 4,
+  auth 12 (unchanged), rbac 27: unauthenticated 401 gate, cross-role 403 FORBIDDEN, CSRF 403 on mutations,
+  org create/dup-409/code-uppercase normalization/patch/list/get, org-out-of-scope masked 404 for in-scope
+  reader + 403 for staff without organization.read, facility create/dup-409/under missing 404 or inactive org
+  409 ORGANIZATION_INACTIVE, membership add/dup-409/role-allowlist-400/USER_NOT_FOUND-404/remove reflected in
+  list, lab-staff read own facility+members 200, lab-staff denied manage 403, cross-facility hidden 403,
+  facility manager manage own 200 / other facility 403, /users/me memberships+effectivePermissions, profile
+  name update, super admin global set, auditor assign/dup-409/INVALID_ROLE_SCOPE-400/use→revoke→403, last
+  super admin 409 LAST_SUPER_ADMIN, audit events with org/facility context + hash chain.
+Known limitations: (1) First PLATFORM_SUPER_ADMIN must be bootstrapped out-of-band (e.g. prisma script/sql);
+  no seeded auto-admin; currently no UI/admin path promotes the first admin (Phase 8). (2) e2e writes to the
+  shared dev DB and cleans up after itself within its own domain/codes. (3) Organization/facility deletion
+  (deactivate-only) is a deliberate future Phase choice. (4) npm audit residual unchanged (Phase 9).
+Decision/ADR reference: ADR-030 (RBAC persistence model + catalogue authority), ADR-031 (centralized
+  PermissionsGuard + resource scoping semantics: 403 vs 404), ADR-032 (bootstrap: no auto-created admin;
+  first assignment out-of-band; last-super-admin invariant).
+```
+
+### Phase 3 entry
+
+```text
+Date: 2026-09-25
+Phase: Phase 3
+Change: Implemented Donors + Donation Operations. Migration `20260925080626_phase3_donors_donations` adds
+  DonorProfile, BloodDrive, CampaignRegistration, Donation, DonationScreening, Deferral + enums (CampaignStatus,
+  DonationState, ScreeningResult, DeferralReason). New modules (registered in app.module.ts in dependency order
+  DonorsModule -> CampaignsModule -> DonationsModule; DonationsModule hosts CampaignCheckInController under
+  /api/v1/campaigns):
+  - donors/domain: deferral policy (active-deferral gating, resolve event, reason codes), pure donor code
+    generation, structured errors.
+  - donors/application, infrastructure: self-service profile upsert on first access (data minimization: no blood
+    group or medical data on the profile), profile update, history views, staff search + facility-linked
+    visibility, deferral record/status/enforcement.
+  - campaigns/domain: state machine DRAFT -> PUBLISHED -> CANCELLED with allowed-transition guards, capacity
+    enforcement with compare-and-set (CAMPAIGN_FULL), booking window check, registration duplicate guard
+    (ALREADY_REGISTERED), cancel-owner-or-manage_registrations rule.
+  - donations/domain + application: state machine SCHEDULED -> CHECKED_IN -> COLLECTED -> SCREENING ->
+    QUARANTINED -> RELEASED (REJECTED from SCREENING/QUARANTINED), walk-in create (donorReference or profile
+    id), atomic campaign check-in creating the donation + registration check-in in one transaction,
+    idempotent check-in, collect with volume + blood group, screening start + pass, quarantine, reject with
+    reasonCode, release, facility-scoped visibility (404 mask), donation.create gated on active facility,
+    deferral enforced at check-in and booking. Donation DTOs leave volumeMl/bloodGroup/reasonCode optional so
+    the service emits structured codes (BLOOD_GROUP_REQUIRED, VOLUME_REQUIRED, REJECT_REASON_REQUIRED) instead
+    of generic BAD_REQUEST. Audit actions for campaign and donation lifecycle with org/facility context +
+    hash chain. E2E spec `test/donor-donation.e2e-spec.ts` covers platform bootstrap, donor self-service
+    (upsert/update/list), campaign lifecycle (create/publish/cancel/named PATCH/booking window/capacity own-
+    and-cancel), campaign check-in (atomic donation create, idempotency, unregistered 404), donation ops
+    (scheduled walk-in, check-in, collect, screening, quarantine, release, invalid-state rejection, reject
+    from SCREENING/QUARANTINED, reasonCode, invalid-state gates), facility-scope masking (donor and donation
+    404) and permission gates (403), deferrals (block/resolve booking), and audit trail coverage.
+Verification commands: npm run typecheck -w apps/api; npm run lint -w apps/api; npx prisma validate;
+  npm run build -w @blood-ops/api; npm run build -w @blood-ops/web; npm run test:unit -w apps/api;
+  npm run test:e2e -w apps/api
+Result: typecheck clean; eslint clean; prisma validate ok; api + web builds ok; unit 113/113 (12 files: audit
+  hash chain, permission catalogue, donor deferral policy, campaigns state machine/capacity/registration,
+  donations state machine/reject path, prior suites); e2e 75/75 (4 files): health 4, auth 12, rbac 27, donor
+  + donation 32. E2E debugging notes: (1) register normalizes emails to lowercase, so helpers had to query
+  lowercase emails (Postgres = is case-sensitive). (2) Facilities default to status PENDING; test helper
+  activates via PATCH before campaign create (campaign create 409s on inactive facility). (3) Login is
+  throttled 10/60s per IP, so high-volume specs cache credentials per user. (4) Cookie and CSRF header must
+  come from the same session. (5) Donation DTOs were made optional on the group/reason fields so business
+  rules (BLOOD_GROUP_REQUIRED, REJECT_REASON_REQUIRED) fire instead of class-validator BAD_REQUEST.
+Known limitations: (1) performCampaignCheckIn carries a raw Error for the not-checkinable path (would surface
+  as an unhandled 500; only reachable in a race, low risk, revisit in a later phase). (2) Donor web UI is not
+  part of this phase (Phase 8 per UI_UX_SPEC); backend + e2e only. (3) Facility must be ACTIVE before any
+  donation or campaign creation; facilities default to PENDING. (4) npm audit residual unchanged from Phase 0
+  (Phase 9 hardening). (5) ADR-033..036 sit before the ADR-032 heading in DECISIONS.md (cosmetic ordering).
+Decision/ADR reference: ADR-033 (create donation at campaign check-in, not at booking), ADR-034 (donation
+  screening/quarantine/release/reject machine + structured screen/reject codes), ADR-035 (donor deferral
+  policy + resolution model), ADR-036 (ownership-bound self-service vs RequireAnywhere staff routes and 404
+  scope masking), ADR-037 (DTOs whitelist shapes; domain emits business-rule codes).
 ```
 
 ### Review 0 entry

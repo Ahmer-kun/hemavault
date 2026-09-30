@@ -324,6 +324,118 @@ Every workflow with consequential transitions has explicit allowed transitions a
 
 **Verification:** unit tests for digest stability and tamper sensitivity; e2e asserts register/verify/login audit rows exist with 64-hex hashes.
 
+## ADR-030 — RBAC persistence model and catalogue authority
+
+**Status:** Accepted
+
+**Context:** Phase 2 requires permission-based authorization (not scattered role-string checks), facility-scoped access, and an auditable role model. The permission set and role definitions must have a single maintainable source of truth.
+
+**Decision:** `Permission` (code unique), `Role` (code unique, `RoleScope` GLOBAL|FACILITY, `isSystem`), `RolePermission` (unique roleId+permissionId), `UserRole` (global assignments, unique userId+roleId, `assignedById`), and `FacilityMembership` (unique userId+facilityId+roleId, `assignedById`) persist assignments. The authorization catalogue lives in `src/modules/rbac/domain/permission-catalogue.ts`: 54 permission codes, 7 roles, `globalRoles()`/`facilityRoles()`, and `assertCatalogueIntegrity()` (defined exactly once, super-admin covers the full catalogue, no duplicate permissions). The seed (`access-control.seed.ts`) upserts and reconciles permissions/roles/rolePermissions idempotently; it runs via `prisma/seed.ts` and vitest `globalSetup` so tests always see a consistent catalogue. Role assignment endpoints only accept roles from the matching scope allowlist (`globalRoles()` for platform assignment, `facilityRoles()` for memberships). Resource lookups are scoped: global permissions satisfy any-facility checks (`canAtFacility` returns true when the actor holds the permission globally); facility permissions only apply within their facility.
+
+**Alternatives considered:** Role-string equality in guards (violates AGENTS.md allowlist rule); SQL-side permission tables only (no catalogue traceability); scope on `Organization` only (does not cover independent facilities under one org).
+
+**Consequences:** Audit-ready assignments, consistent RBAC across modules, and a verifiable catalogue invariant. Couples future role/permission changes to catalogue edits, which is desirable.
+
+**Verification:** unit `permission-catalogue.spec.ts` (integrity, uniqueness, super-admin rollup, scope partition) + `policy.spec.ts`; e2e covers member/role assignment allowlists and `effectivePermissions` reporting.
+
+## ADR-031 — Centralized PermissionsGuard with resource-scoping semantics (403 vs 404)
+
+**Status:** Accepted
+
+**Context:** AGENTS.md requires server-side authorization for every protected operation and prohibition of UI-hiding-as-authorization, while the threat model demands masking resource existence from unauthorized parties (anti-enumeration).
+
+**Decision:** A single global `PermissionsGuard` runs after `AuthGuard` on every non-`@Public` route. Controllers declare requirements declaratively: `RequireGlobal` (platform-level permission), `RequireAnywhere` (permission present globally or at any facility the actor belongs to), `RequireFacilityScope(permission(s), ':param', anyOf?)` (must satisfy at the specific resource). The guard builds the actor once per request and returns 403 `FORBIDDEN` when the declared permission requirement fails (including out-of-scope facility resources). The application layer additionally re-checks resource existence/scoping and returns 404 for out-of-scope organizations/facilities to avoid leaking ID existence. Public routes bypass the guard.
+
+**Alternatives considered:** Per-route ad-hoc checks in services (duplicated logic, easy to forget); returning 404 for every denial (loses UX clarity for legitimate-but-unauthorized actions per API_CONTRACT).
+
+**Consequences:** Server-enforced authorization with consistent error codes; permission requirements are visible in route metadata (OpenAPI surfaces them); services still enforce scope defensively.
+
+**Verification:** e2e: cross-role 403, cross-facility 403, out-of-scope organization masked as 404 for an in-scope reader, 403 for a reader lacking `organization.read`; me() reports effective permissions.
+
+## ADR-033 — Phase 3 domain model and state machines (donors, campaigns, donations)
+
+**Status:** Accepted
+
+**Context:** Phase 3 introduces donor profiles, blood drives/campaigns, campaign registrations (appointments), donation events, screening records, and donor deferrals. Specs define relationships and a donation state machine but leave exact table fields and several workflows unspecified (`docs/DOMAIN_MODEL.md`, `docs/STATE_MACHINES.md`, `docs/API_CONTRACT.md`).
+
+**Decision:** Persist `DonorProfile` (User 1—0..1 DonorProfile; fields: `publicCode` donor reference, `name`, optional `dateOfBirth`, optional self-reported `bloodGroup`), `BloodDrive` (facility, name, description, location, startsAt/endsAt, targetUnits, capacity, status DRAFT/PUBLISHED/CANCELLED/COMPLETED), `CampaignRegistration` (donor + campaign, unique per donor/campaign, status CONFIRMED/CHECKED_IN/CANCELLED), `Donation` (donor, facility, optional campaignRegistration, `publicCode`, state, timestamps, collection volume/blood group), `DonationScreening` (one per donation, minimal traceability fields), and `DonorDeferral` (set by staff). Donation states implement `docs/STATE_MACHINES.md` verbatim (`SCHEDULED/CHECKED_IN/COLLECTED/SCREENING/QUARANTINED/RELEASED/REJECTED/CANCELLED/COMPLETED`); the machine is a pure tested module and every transition is a compare-and-set guarded update. A campaign check-in simultaneously moves the registration to CHECKED_IN and creates the donation (SCHEDULED→CHECKED_IN) in the same transaction; because the donation is only created at check-in, a CONFIRMED registration never has a linked donation, so registration cancellation affects the booking only. `SCHEDULED→CANCELLED` and `RELEASED→COMPLETED` are defined in the machine but not reachable through Phase 3 endpoints (a standalone donation-cancel endpoint and unit transcription land later); the machine file remains authoritative. Profile blood group is self-reported display data only; the verified group is recorded on the donation/screening and is what future allocation will use.
+
+**Alternatives considered:** Profile merged into `User` (violates domain separation); naive SCHEDULED-only bookings without appointment state; donation-cancel route added to the contract (deferred).
+
+**Consequences:** Contract-faithful endpoint surface; explicit auditable donation lifecycle; inventory hand-off (release → units) lands in Phase 4.
+
+**Verification:** unit state-machine specs for all donation/campaign/registration transitions; e2e covers full donor and staff flows.
+
+## ADR-034 — Donation screening/quarantine decision flow
+
+**Status:** Accepted
+
+**Context:** The donation machine has `COLLECTED→SCREENING`, `SCREENING→QUARANTINED | REJECTED`, `QUARANTINED→RELEASED | REJECTED`. The API surface offers `screen`, `release`, and `reject` commands only, leaving no dedicated `SCREENING→QUARANTINED` decision endpoint.
+
+**Decision:** `POST /donations/:id/screen` is invoked from `COLLECTED` to enter screening (`COLLECTED→SCREENING`), writing the `DonationScreening` record (verified blood group required, minimal note, screenedBy) with result `IN_PROGRESS`. Re-invoking `screen` from `SCREENING` with a decision acts as the screening-result command (`SCREENING→QUARANTINED`). `reject` performs `SCREENING→REJECTED` and `QUARANTINED→REJECTED` (a `reasonCode` is required, referencing a configurable external catalog — free text in Phase 3). `release` performs `QUARANTINED→RELEASED` only. QUARANTINE is therefore always entered via an explicit screening pass; a quarantined/rejected donation can never become available without a valid transition (release is the only path toward Phase 4 unit transcription). Repeat of a completed command returns `409 INVALID_STATE` except check-in, which is idempotent.
+
+**Alternatives considered:** Coalescing SCREENING into the screen command (loses the observable screening state the machine defines); inventing a new decision endpoint outside the contract.
+
+**Consequences:** SCREENING remains an observable operational state; lab staff see exactly `collect → screen → (pass→quarantine | reject)`; the machine file is the single authority.
+
+**Verification:** unit transition table; e2e staff flow covers collect→screen(IN_PROGRESS)→screen(PASS)→quarantine→release and both rejection branches.
+
+## ADR-035 — Donor eligibility and deferral boundary
+
+**Status:** Accepted
+
+**Context:** Acceptance criteria require a donor to "book/cancel eligible campaign appointments". `docs/PRODUCT_REQUIREMENTS.md` is explicit: "Actual medical eligibility criteria are external/configurable policy, not invented in the core code." No eligibility or deferral tables or endpoints exist in the contract.
+
+**Decision:** The core code performs no medical eligibility computation (no min-interval, age, hemoglobin, or shelf-life rules). The only automated booking/check-in gate is an explicit staff-declared `DonorDeferral` (reasonCode referencing a configurable external catalog, optional note, effectiveAt, optional expiresAt, createdBy, resolvable). A donor with an ACTIVE (unresolved and not expired) deferral cannot book a campaign registration or be checked in (409 `DEFERRAL_ACTIVE`). Deferral management is exposed as a deliberate small extension of the donor context (`POST /donors/:id/deferrals`, `POST /donors/:id/deferrals/:deferralId/resolve`, `GET /donors/:id/deferrals`) gated by `donor.update`/`donor.read`, recorded here because the contract does not list it. Human staff remain responsible for all eligibility judgment.
+
+**Alternatives considered:** No deferral gate at all (makes "eligible" unimplementable); timestamp arithmetic pretending to be policy (invents medical rules — prohibited).
+
+**Consequences:** Booking "eligibility" is operational (staff record), never algorithmic; the external policy catalog for reason codes is seeded empty in Phase 3.
+
+**Verification:** unit booking-eligibility spec (deferral active/expired/resolved, capacity, published, window, duplicate); e2e deferral blocks booking then resolves.
+
+## ADR-036 — Donor self-service access and donor/campaign/donation scoping
+
+**Status:** Accepted
+
+**Context:** Donor-facing routes (`/donors/me`, `/donors/me/donations`, campaign browsing/booking) have no natural permission code carrier, and donors hold no facility memberships. Staff donor search must be "permission-controlled and facility-aware"; campaign/donation resources are facility-scoped but their IDs are not facility IDs.
+
+**Decision:** Self-service routes carry NO permission decorator; the global guard passes through and the service authorizes by session ownership (`actor.userId` matches the donor profile's user). The `DONOR` role remains available for UI/effectivePermissions display but Phase 3 authorization never depends on it. Staff routes use `RequireAnywhere` for the relevant code (donor.search for search, donor.read for detail/history, campaign.* / donation.* for their commands) and the service re-checks facility scope against `donation`/`campaign.facilityId`: failure of the declared permission → 403 FORBIDDEN; in-scope permission but out-of-scope resource → 404 NOT_FOUND (masked, per ADR-031). Donor search is facility-aware through a "donor is visible if it has a donation at an actor facility, or globally" rule. `GET /campaigns` is shared: a caller with `campaign.read` sees scoped/all campaigns; any other authenticated caller (e.g. a donor) sees only PUBLISHED campaigns (public listing per `docs/UI_UX_SPEC.md`). PATCH on a campaign accepts a `status` field validated against the campaign machine so "complete" is reachable without a dedicated endpoint.
+
+**Alternatives considered:** Requiring the DONOR role/membership for self-service (adds admin burden with no security gain); one permission code forcing both audiences to the same route semantics (wrong for donors).
+
+**Consequences:** Self-service is safe by ownership; staff scoping matches Phase 2 semantics; donors never observe non-published campaigns.
+
+**Verification:** e2e cross-facility 404/403, donor-vs-staff campaign lists, self-service ownership rejection (donor A cannot read donor B via /donors/me), deferral-gated booking.
+
+## ADR-032 — Platform bootstrap: no auto-created admin, out-of-band first super admin, last-admin invariant
+
+**Status:** Accepted
+
+**Context:** The platform needs at least one `PLATFORM_SUPER_ADMIN` to perform initial setup, but auto-creating a privileged account during seed would be an unflagged trust/security hazard.
+
+**Decision:** No role assignment is created by seed or migration. The first super admin is promoted out-of-band (operator-run script/SQL, recorded here as an operational procedure). `PLATFORM_SUPER_ADMIN` cannot be removed when it is the last remaining one (409 `LAST_SUPER_ADMIN`, checked inside the removal transaction path). Only holders of `user.manage_roles` may assign/remove global roles.
+
+**Alternatives considered:** Seeding a default super-admin account (credential/email risk at deploy time); allowing removal to lock the platform.
+
+**Consequences:** Initial activation requires an operator action; the invariant prevents irreversible lockout. (Elevation for a *non-active* account is disallowed because only ACTIVE users sign in, so the first assignment targets an ACTIVE verified user.)
+
+**Verification:** e2e assigns the first super admin via direct DB row (simulating the out-of-band bootstrap), then exercises role management over the API; last-super-admin removal returns 409 `LAST_SUPER_ADMIN`.
+
+## ADR-037 — Business-rule validation lives in the domain; DTOs only whitelist shapes
+
+**Status:** Accepted
+
+**Context:** Mutating donation endpoints (collect, reject) originally required `bloodGroup`/`reasonCode` in their DTOs, so missing values failed class-validator with a generic `BAD_REQUEST` instead of the domain's structured codes (`BLOOD_GROUP_REQUIRED`, `VOLUME_REQUIRED`, `REJECT_REASON_REQUIRED`).
+
+**Decision:** DTO validation is limited to shape coercion and sanity ranges (types, integer/ISO8601/string, min/max bounds). Presence rules that carry business meaning are enforced by the domain (service) layer, which emits structured error codes. This applies to `CollectDonationDto.volumeMl/bloodGroup` and `RejectDonationDto.reasonCode` being optional, mirroring `CreateDonationDto`.
+
+**Alternatives considered:** Keeping the fields required at the DTO and mapping validator messages to codes (fragile message coupling); handling presence in a custom validator class (more machinery without domain benefit).
+
+**Consequences:** Clients receive consistent, documented error codes for rule violations; DTOs stay thin whitelists; domain rules remain testable by unit tests without HTTP. A malformed non-null value still fails validation (type/syntax), only genuine absence reaches the business-rule path.
+
+**Verification:** e2e asserts `BLOOD_GROUP_REQUIRED`, `SCREEN_DECISION_REQUIRED`, and `REJECT_REASON_REQUIRED` codes; unit specs cover the service-level rules directly.
+
 ## ADR template
 
 ### ADR-XXX — Title
