@@ -85,11 +85,22 @@ describe('donors, campaigns, and donation operations (e2e)', () => {
     await prisma.$executeRawUnsafe(
       `DELETE FROM "DonationScreening" WHERE "donationId" IN (SELECT "id" FROM "Donation" WHERE "facilityId" IN (SELECT "id" FROM "Facility" WHERE ${facilityWhere}));`,
     );
+    // ADR-015: released donations create inventory units; clean dependent rows before donations.
+    const donationScope = `"donorProfileId" IN (SELECT "id" FROM "DonorProfile" WHERE "userId" IN (SELECT "id" FROM "User" WHERE "email" LIKE '%@${EMAIL_DOMAIN}')) OR "facilityId" IN (SELECT "id" FROM "Facility" WHERE ${facilityWhere})`;
+    const unitScope = `"donationId" IN (SELECT "id" FROM "Donation" WHERE ${donationScope}) OR "facilityId" IN (SELECT "id" FROM "Facility" WHERE ${facilityWhere})`;
     await prisma.$executeRawUnsafe(
-      `DELETE FROM "Donation" WHERE "donorProfileId" IN (SELECT "id" FROM "DonorProfile" WHERE "userId" IN (SELECT "id" FROM "User" WHERE "email" LIKE '%@${EMAIL_DOMAIN}')) OR "facilityId" IN (SELECT "id" FROM "Facility" WHERE ${facilityWhere});`,
+      `DELETE FROM "InventoryMovement" WHERE "unitId" IN (SELECT "id" FROM "BloodComponentUnit" WHERE ${unitScope});`,
     );
     await prisma.$executeRawUnsafe(
-      `DELETE FROM "CampaignRegistration" WHERE "campaignId" IN (SELECT "id" FROM "BloodDrive" WHERE "facilityId" IN (SELECT "id" FROM "Facility" WHERE ${facilityWhere}));`,
+      `DELETE FROM "ReservationItem" WHERE "unitId" IN (SELECT "id" FROM "BloodComponentUnit" WHERE ${unitScope}) OR "reservationId" IN (SELECT "id" FROM "Reservation" WHERE "facilityId" IN (SELECT "id" FROM "Facility" WHERE ${facilityWhere}));`,
+    );
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM "Reservation" WHERE "facilityId" IN (SELECT "id" FROM "Facility" WHERE ${facilityWhere});`,
+    );
+    await prisma.$executeRawUnsafe(`DELETE FROM "BloodComponentUnit" WHERE ${unitScope};`);
+    await prisma.$executeRawUnsafe(`DELETE FROM "Donation" WHERE ${donationScope};`);
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM "CampaignRegistration" WHERE "campaignId" IN (SELECT "id" FROM "BloodDrive" WHERE "facilityId" IN (SELECT "id" FROM "Facility" WHERE ${facilityWhere})) OR "donorProfileId" IN (SELECT "id" FROM "DonorProfile" WHERE "userId" IN (SELECT "id" FROM "User" WHERE "email" LIKE '%@${EMAIL_DOMAIN}'));`,
     );
     await prisma.$executeRawUnsafe(
       `DELETE FROM "DonorDeferral" WHERE "donorProfileId" IN (SELECT "id" FROM "DonorProfile" WHERE "userId" IN (SELECT "id" FROM "User" WHERE "email" LIKE '%@${EMAIL_DOMAIN}'));`,

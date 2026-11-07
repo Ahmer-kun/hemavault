@@ -21,6 +21,7 @@ import { UsersModule } from './modules/users/users.module';
 import { DonorsModule } from './modules/donors/donors.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { DonationsModule } from './modules/donations/donations.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { DonationsModule } from './modules/donations/donations.module';
     DonorsModule,
     CampaignsModule,
     DonationsModule,
+    InventoryModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

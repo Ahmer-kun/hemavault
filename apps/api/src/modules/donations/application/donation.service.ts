@@ -26,6 +26,8 @@ import {
   invalidDonationStateError,
 } from '../domain/donation.errors';
 import { DonationRepository, DonationWithDetails } from '../infrastructure/donation.repository';
+import { DonationIntegrationService } from '../../inventory/application/donation-integration.service';
+import { PrismaService } from '../../../common/database/prisma.service';
 
 export interface RequestContext {
   requestId: string;
@@ -77,6 +79,8 @@ export class DonationService {
     private readonly rbacService: RbacService,
     private readonly auditService: AuditService,
     private readonly donorService: DonorService,
+    private readonly donationIntegration: DonationIntegrationService,
+    private readonly prisma: PrismaService,
   ) {}
 
   async create(
@@ -290,10 +294,18 @@ export class DonationService {
     if (row.state !== 'QUARANTINED') {
       throw invalidDonationStateError();
     }
-    const moved = await this.repository.transitionState(donationId, 'QUARANTINED', 'RELEASED');
-    if (!moved) {
-      throw invalidDonationStateError();
-    }
+    // ADR-015: donation release and inventory unit creation are atomic. The CAS
+    // transition prevents double-release; unit creation is idempotent by donationId.
+    await this.prisma.$transaction(async (tx) => {
+      const moved = await tx.donation.updateMany({
+        where: { id: donationId, state: 'QUARANTINED' },
+        data: { state: 'RELEASED' },
+      });
+      if (moved.count !== 1) {
+        throw invalidDonationStateError();
+      }
+      await this.donationIntegration.createUnitsForReleasedDonation(donationId, actor.userId, tx);
+    });
     await this.auditAction(actor, context, DONATION_ACTIONS.DONATION_RELEASED, donationId, row);
     return this.requireView(donationId);
   }

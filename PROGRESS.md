@@ -83,17 +83,17 @@ Verified findings (2026-09-21):
 
 ## Phase 4 — Inventory Engine
 
-- [ ] Component types/reference data implemented.
-- [ ] Blood/component unit model implemented.
-- [ ] Storage location implemented.
-- [ ] Inventory movement ledger implemented.
-- [ ] Unit state machine implemented.
-- [ ] Expiration handling implemented.
-- [ ] Reservation locking strategy implemented.
-- [ ] Reconciliation strategy implemented.
-- [ ] Inventory audit history implemented.
-- [ ] Concurrency tests pass.
-- [ ] No negative/duplicate available inventory invariant passes.
+- [x] Component types/reference data implemented. (read/list services + API; schema models exist; idempotent seed wired)
+- [x] Blood/component unit model implemented. (Prisma model + services)
+- [x] Storage location implemented. (Prisma model + facility-scoped list)
+- [x] Inventory movement ledger implemented. (append-only `InventoryMovement` in atomic tx; state+movement validated; stale-write guard; movement-type/target-state compatibility)
+- [x] Unit state machine implemented. (pure validator per STATE_MACHINES.md + ADR-016 RECALLED terminal)
+- [x] Expiration handling implemented. (lazy effective-state classification + bounded in-process sweep, no external worker — ADR-017)
+- [x] Reservation locking strategy implemented. (SELECT FOR UPDATE + recheck + active-claim check + partial unique active-claim index + facility-scoped idempotency + stale-write guard; ADR-020). **DB-level concurrency proof blocked** (no isolated Postgres available; tests written).
+- [~] Reconciliation strategy implemented. (append-only RECONCILED movement, state machine enforced, server-side auth/scope, reason required, AuditEvent emitted; policy may need further ADR refinement)
+- [x] Inventory audit history implemented for implemented commands. (immutable movement history exposed; AuditEvent emitted for move/quarantine/discard/reconcile; reservation/issuance commands are Phase 5 API scope)
+- [x] Concurrency tests pass. Verified 2026-11-07 against isolated local PostgreSQL (`hemavault-test-db`, `localhost:5433/hemavault_test`, migrations applied via `prisma migrate deploy`; `DATABASE_URL`/`TEST_DATABASE_URL` set to isolated DB only, never Supabase). `apps/api/test/inventory-concurrency.e2e-spec.ts`: **8 passed, 0 failed** (simultaneous same-unit reservations, idempotency retries, different idempotency keys, expired-unit rejection, DB partial unique index, facility isolation, 8-way invariant, tx rollback atomicity).
+- [x] No negative/duplicate available inventory invariant passes. Verified by DB tests above (exactly-one active claim / 1 success across concurrent attempts) plus partial unique index `ReservationItem_unitId_active_unique` (WHERE `isActive=true`) and service-side FOR UPDATE + recheck + stale-write guard.
 
 ## Phase 5 — Requests + Matching + Reservation + Issuance
 
@@ -274,6 +274,120 @@ Known limitations: (1) First PLATFORM_SUPER_ADMIN must be bootstrapped out-of-ba
 Decision/ADR reference: ADR-030 (RBAC persistence model + catalogue authority), ADR-031 (centralized
   PermissionsGuard + resource scoping semantics: 403 vs 404), ADR-032 (bootstrap: no auto-created admin;
   first assignment out-of-band; last-super-admin invariant).
+```
+
+### Phase 4 entry (inventory foundation + core workflows; partial verification)
+
+```text
+Date: 2026-11-07
+Phase: Phase 4 (partial)
+Change: Implemented core Inventory Engine foundation and workflows per STATE_MACHINES.md, ADR-015/016/017/020:
+  - Prisma/schema + migration `20261028065459_reservation_item_active_claims` (applied to Supabase; partial unique
+    index `ReservationItem_unitId_active_unique` on active claims). Existing migrations not edited.
+  - Domain: pure unit state machine (STATE_MACHINES + RECALLED terminal) with typed transition validation.
+  - Application: InventoryMovementService records append-only movements and unit state changes in one Prisma
+    transaction; validates transitions, movement-type/target-state compatibility, and stale-write conflicts
+    (updateMany on observed state). ExpiryService provides lazy effective-state classification and bounded
+    in-process sweep (ADR-017, no external worker/Redis). ReservationService implements SELECT FOR UPDATE,
+    expiry/availability recheck, active-claim check, facility-scoped idempotency, and reservation item creation.
+    DonationIntegrationService creates units in QUARANTINED for released donations and requires separate release
+    to AVAILABLE (ADR-015). ComponentType/StorageLocation/Unit/summary/expiring/reconciliation services.
+  - Presentation: /api/v1/inventory endpoints (units, summary, expiring, move, quarantine, discard, reconcile,
+    movements, component-types, storage-locations) with RequireAnywhere permissions, CSRF on mutations, envelope
+    responses, and facility-scope masking (404) for non-global actors.
+  - Seed/global setup: idempotent default component types added (does not run against Supabase automatically).
+  - Integration: DonationsModule imports InventoryModule; DonationService.release() triggers idempotent
+    inventory unit creation per ADR-015 (post-release step; atomicity with donation state transition is a known
+    limitation to harden in a follow-up transaction refactor).
+
+Verification commands (run in this environment):
+  cd apps/api; npx vitest run --config vitest.config.noglobal.tmp.ts-equivalent (globalSetup temporarily
+    disabled due to DB connectivity failure) src/modules/inventory src/modules/donors/domain
+    src/modules/campaigns/domain src/modules/donations/domain
+  cd apps/api; npx tsc --noEmit -p tsconfig.json
+  cd apps/api; npm run build
+
+Result:
+  Targeted unit tests: 9 files, 88 tests passed (inventory domain 12, movement 7, expiry 3, reservation 3,
+    donation-integration 3, plus existing donors/campaigns/donations domain suites 60).
+  TypeScript: clean (noEmit).
+  API build: success (nest build).
+
+Known limitations / blockers (not claimed complete):
+  (1) Full API unit suite and e2e/integration suites could not run: vitest globalSetup failed connecting to
+      Supabase (Prisma ENOTFOUND/FATAL tenant error in this environment). Shared dev DB is also unsafe for
+      genuine concurrency tests; no isolated test database was available.
+  (2) DB-level concurrency/invariant proof not executed in this session: partial unique active-claim index is
+      applied (verified earlier via migration/catalog checks) and reservation service uses FOR UPDATE + recheck,
+      but "concurrency tests pass" and "no negative/duplicate available inventory invariant passes" remain
+      unverified at DB level.
+  (3) Inventory audit events (AuditEvent records) are not emitted for all inventory commands; immutable
+      movement history is implemented and exposed.
+  (4) Donation release -> inventory unit creation is not wrapped in the same DB transaction as donation state
+      transition (pre-existing donation release flow); idempotent creation mitigates but does not eliminate
+      partial-completion risk.
+  (5) Reservation API endpoints/workflows beyond locking strategy are Phase 5 scope; service exists.
+  (6) Reconciliation is a corrective append-only movement path; fine-grained policy for authorized corrections
+      may need ADR clarification.
+  (7) No migrations created in this slice; none applied automatically.
+
+Decision/ADR reference: ADR-015, ADR-016, ADR-017, ADR-020.
+```
+
+### Phase 4 finalization pass (2026-11-07, continued)
+
+```text
+Date: 2026-11-07 (finalization)
+Phase: Phase 4 (verification hardening; DB concurrency still blocked)
+Change (Phase 4 files only; no unrelated user changes touched):
+  - Fixed DonationIntegrationService to propagate Prisma tx into InventoryMovementService.recordMovement (required for ADR-015 atomicity).
+  - Made donation release atomic (ADR-015): DonationService.release() now runs donation QUARANTINED->RELEASED CAS + inventory unit creation inside one Prisma $transaction; audit recorded after commit (existing pattern). Idempotent unit creation preserved.
+  - InventoryController: added AuditEvent emission (AuditService) for move/quarantine/discard/reconcile; discard and reconcile require explicit reason (safety/audit). InventoryModule imports AuditModule. Reconciliation still enforces state machine via movement service and appends immutable movement records.
+  - Added genuine PostgreSQL integration/concurrency test spec: apps/api/test/inventory-concurrency.e2e-spec.ts. Covers same-unit concurrent reservations (exactly-one-winner), same idempotency key retries, different idempotency keys same unit, expired-unit rejection, DB-level partial unique active-claim rejection, facility isolation, multi-attempt invariant, and tx rollback atomicity. Safety: skipped unless TEST_DATABASE_URL is set and non-Supabase; never uses production/shared Supabase.
+
+Verification commands (this pass):
+  cd apps/api; npx vitest run --config vitest.config.unit-nodb.tmp.ts (temporary, deleted after run; globalSetup skipped due to unreachable DB in environment)
+  cd apps/api; npx tsc --noEmit -p tsconfig.json
+  cd apps/api; npm run build
+
+Result:
+  API unit tests (src/**/*.spec.ts, no-DB run): 17 files, 141 tests passed, 0 failed. Includes all inventory unit specs and existing donors/campaigns/donations/auth/RBAC-adjacent unit/domain suites present under src/.
+  TypeScript noEmit: clean.
+  API build (nest build): success.
+  E2E/integration (test/*.e2e-spec.ts, including auth/rbac/donor-donation/health and new inventory-concurrency): NOT EXECUTED — blocked (see below).
+
+Environment blockers (genuine):
+  - Docker daemon unreachable: `docker ps` failed with "open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified". Cannot start isolated local PostgreSQL from docker-compose in this environment.
+  - Vitest globalSetup (apps/api/test/global-setup.ts) requires DB connectivity and failed earlier with Prisma ENOTFOUND/FATAL tenant error against configured DB; shared/prod/Supabase data must not be used for concurrency tests.
+  - Therefore: PostgreSQL integration/concurrency tests are written but not executed; "concurrency tests pass" and "no negative/duplicate available inventory invariant passes" cannot be marked [x] without isolated DB execution.
+
+Preserved: existing deployed migrations not edited; no destructive DB commands; no migrations applied to Supabase; no schema changes created; no secrets exposed; unrelated user changes not staged/reverted.
+```
+
+### Phase 4 verification completed (isolated PostgreSQL, 2026-11-07)
+
+```text
+Date: 2026-11-07 (verification completed)
+Environment (isolated test DB only): Docker container `hemavault-test-db` (postgres:16), localhost:5433, database `hemavault_test`. DATABASE_URL/DIRECT_URL/TEST_DATABASE_URL pointed to this DB for test commands only; production/Supabase env files were not modified and no migrations/tests were run against Supabase.
+Safety checks: confirmed effective Prisma host localhost:5433 before migrations; used `prisma migrate deploy` (existing migrations only).
+
+Migrations applied to isolated DB (deploy): 20260921000000_init, 20260921083607_phase1_auth, 20260925065532_phase2_rbac, 20260925080626_phase3_donors_donations, 20261028065459_reservation_item_active_claims.
+
+Fixes during verification (test-revealed / ADR-015 integration):
+  - DonationIntegrationService.createUnitsForReleasedDonation: create unit in COLLECTED then transition to QUARANTINED via movement service (fixes INVENTORY_UNIT_TRANSITION_SAME_STATE; state machine forbids same-state; preserves append-only movement/atomicity under tx).
+  - test/inventory-concurrency.e2e-spec.ts: aligned fixtures to schema (DonorProfile requires userId+name; BloodGroup enum O_POS; removed unused imports; isolated cleanup).
+  - test/donor-donation.e2e-spec.ts: teardown cleanup updated to delete inventory movements/reservation items/reservations/units created by ADR-015 before donations, and broadened registration/donation scopes; no test assertions weakened.
+
+Commands/results (isolated DB):
+  prisma migrate deploy — 5 migrations applied successfully to hemavault_test@localhost:5433.
+  npx vitest run test/inventory-concurrency.e2e-spec.ts — 1 file, 8 tests passed.
+  npm run test:unit — 17 files, 141 tests passed.
+  npm run test:e2e — 5 files, 83 tests passed (health 4, auth 12, rbac 27, donor-donation 32, inventory-concurrency 8).
+  npm test — 22 files, 224 tests passed, 0 failed.
+  npx tsc --noEmit -p tsconfig.json — clean.
+  npm run build — success.
+
+Acceptance outcome: Phase 4 inventory-engine criteria verified, including DB-level concurrency/invariant tests and full API regression (units 141 + e2e 83). Reconciliation remains a minimal corrective append-only path with auth/scope/reason/AuditEvent; further policy refinement may be ADR-driven but does not block the documented Phase 4 acceptance set above.
 ```
 
 ### Phase 3 entry
