@@ -97,20 +97,20 @@ Verified findings (2026-09-21):
 
 ## Phase 5 — Requests + Matching + Reservation + Issuance
 
-**Planning:** completed 2026-11-07 — see `docs/PHASE_5_PLAN.md`. **Step 1 verified + Step 2 implemented (backend/API) on 2026-11-08** against isolated local PostgreSQL only (`hemavault-test-db`, `postgres:16`, `localhost:5433/hemavault_test`; host positively verified before DB mutations). Step 3+ not started.
+**Planning:** completed 2026-11-07 — see `docs/PHASE_5_PLAN.md`. **Step 1/2 complete (2026-11-08) and Step 3 complete (2026-11-08, backend/API)** against isolated local PostgreSQL only (`hemavault-test-db`, `postgres:16-alpine`, `localhost:5433/hemavault_test`; host positively verified before DB mutations). No Supabase migrations/tests. Step 4+ not started.
 
 - [x] Hospital request implemented. (Step 2: `requests` module, `/api/v1/requests` CRUD/lifecycle endpoints, facility scope, audit, DTO validation, CSRF)
 - [x] Request priority/urgency implemented. (Step 2: `RequestUrgency` persisted/validated; emergency/critical escalation timestamp metadata; no safety-rule bypass)
 - [x] Request lifecycle implemented. (Step 2: pure domain state machine; submit/approve/reject/cancel; contract-aligned compound review transition where `/review` route absent; invalid/terminal transitions rejected)
-- [ ] Configurable compatibility matrix implemented.
-- [ ] Inventory matching service implemented.
-- [ ] FEFO-style allocation implemented where policy permits.
+- [x] Configurable compatibility matrix/framework implemented. (Step 3: versioned `CompatibilityRuleSet`/`CompatibilityRule` resolution, effective dates, active/unambiguous/approved selection; **no invented clinical values**. Production matching blocked pending authoritative, human-reviewed dataset — ADR-018/040/042; non-clinical fixtures only in isolated `NODE_ENV=test`.)
+- [x] Inventory matching service implemented. (Step 3: request-scoped read-only matching, operational eligibility/exclusion explanations, rule-set version/timestamp, `GET /api/v1/requests/:requestId/matches`; no reservations/state changes/movements)
+- [~] FEFO-style allocation implemented where policy permits. (Step 3: FEFO candidate ordering for eligible matches implemented; transactional reservation/allocation command deferred to Step 4)
 - [ ] Reservation command implemented transactionally.
-- [ ] Partial fulfillment implemented.
+- [ ] Partial fulfillment implemented. (Step 3 matching reports quantity needed/eligible/shortfall; request-scoped reservation fulfillment deferred to Step 4)
 - [ ] Issuance implemented.
-- [ ] Fulfillment tracking implemented.
+- [ ] Fulfillment tracking implemented. (Step 2 line counters/structure exist; transactional reservation/issuance updates deferred to Steps 4–5)
 - [~] Emergency workflow implemented. (Step 2 urgency/escalation metadata + audit hooks only; full operational alerting/queue delivery deferred to later Phase 5/6 steps per ADR-021)
-- [ ] Critical request tests pass. (Request domain/lifecycle/API/RBAC/isolation/quantity/tx-rollback tests pass; matching/reservation/issuance/concurrency critical-path tests pending Step 3+)
+- [~] Critical request tests pass. (Request lifecycle + Step 3 matching/compatibility/policy/RBAC/isolation/exclusions/FEFO/partial/no-side-effects tests pass on isolated DB; transactional reservation/issuance/concurrency critical-path tests pending Steps 4–5)
 
 ## Phase 6 — Transfers + Notifications + Real-Time
 
@@ -529,6 +529,35 @@ Verification (isolated localhost:5433 only, host verified):
   npm run build (nest build) — success.
 
 Acceptance (Step 2): request create/read/update/list, lifecycle submit/approve/reject/cancel, priority/urgency, facility isolation/RBAC/CSRF/validation/audit, invalid-transition and quantity guards, tx rollback invariant test — verified. Not implemented/deferred: matching (Step 3), request-scoped reservations/issuance/fulfillment commands (Steps 4–5), full emergency alert delivery (Phase 6), frontend, approved clinical compatibility values (ADR-040 blocker).
+```
+
+### Phase 5 Step 3 — Compatibility engine & matching API (2026-11-08)
+
+```text
+Date: 2026-11-08
+Phase: Phase 5 Step 3 (versioned compatibility engine, matching service, GET /api/v1/requests/:requestId/matches)
+Scope implemented (backend/API): apps/api/src/modules/matching/** (pure domain: rule-set policy selection, compatibility evaluator, candidate matcher/FEFO/eligibility/exclusions; repository for CompatibilityRuleSet/Rule; MatchingService read-only request-scoped matching; matches query DTO). Requests integration: request.errors (MATCHING_POLICY_UNAVAILABLE), requests.module wiring (InventoryModule import for ExpiryService), RequestsController GET /:requestId/matches (request.read, facility scope/404 masking, bounded query, structured envelope). docs/API_CONTRACT.md documented. ADR-042 recorded.
+
+Compatibility engine: uses existing CompatibilityRuleSet/CompatibilityRule models; explicit rule-set version recorded in every match response; effective dates/status/ambiguity handled; technical rule evaluation is data-driven (no invented clinical values). Production matching remains disabled until authoritative, human-reviewed dataset approved/loaded (ADR-018/040/042): missing/inactive/ambiguous/unapproved/outside-window policies return explicit 409 MATCHING_POLICY_UNAVAILABLE with reason. Non-clinical fixtures (isNonClinicalFixture=true) allowed only in isolated automated tests (NODE_ENV=test); never production-eligible, never seeded to production.
+
+Matching behavior: request/facility-scoped candidates by component type; excludes QUARANTINED/RECALLED/DISCARDED/EXPIRED/ISSUED/CLOSED/USED/TRANSFER_PENDING/IN_TRANSIT/RECEIVED/COLLECTED/STATE_NOT_AVAILABLE, RESERVED/actively claimed, effectively expired (ExpiryService classification), and incompatible/ambiguous rule outcomes; FEFO ordering for eligible candidates; respects quantity requested/reserved/issued, reports quantityNeeded/eligible/shortfall (partial matching); includes operational exclusion reasons, rule-set metadata, timestamp, advisory notice. Read-only: no reservations, no unit state changes, no inventory movements.
+
+Tests added (all NON-CLINICAL fixtures clearly labeled, isolated DB): src/modules/matching/domain/rule-set-policy.spec.ts, compatibility-evaluator.spec.ts, candidate-matcher.spec.ts, src/modules/matching/application/matching.service.spec.ts, test/request-matching.e2e-spec.ts. Coverage includes rule-set selection/version/missing/inactive/unapproved/ambiguous/effective-window, non-clinical fixture blocked outside test mode, compatibility evaluation, exclusions/expiry/FEFO/partial/ambiguity, no side effects/pure inputs, API authz/facility isolation/404 masking, policy unavailable/inactive, excluded states incl. reserved/active claim/effectively expired, insufficient stock partial matches, repeated matching no inventory/reservation/movement changes.
+
+Database/migration: NO schema changes, NO new migrations, NO historical migration edits, NO destructive commands, NO Supabase. Verified against isolated local PostgreSQL only (hemavault-test-db, postgres:16-alpine, localhost:5433/hemavault_test; DATABASE_URL/DIRECT_URL/TEST_DATABASE_URL set to isolated DB in-process, host positively verified).
+
+Verification (isolated localhost:5433 only):
+  prisma validate — schema valid.
+  npx vitest run src/modules/matching/domain — 3 files/20 passed.
+  npx vitest run src/modules/matching/application — 1 file/4 passed.
+  npx vitest run test/request-matching.e2e-spec.ts — 1 file/9 passed.
+  npm run test:unit — 23 files/181 passed.
+  npm run test:e2e — 7 files/109 passed (health 4, auth 12, rbac 27, donor-donation 32, inventory-concurrency 8, requests 17, request-matching 9).
+  npm test — 30 files/290 passed, 0 failed.
+  npx tsc --noEmit -p tsconfig.json — clean.
+  npm run build (nest build) — success.
+
+Production compatibility policy status: MATCHING DISABLED FOR PRODUCTION until authoritative, human-reviewed clinical compatibility reference dataset is approved/loaded and a production-eligible (non-fixture, approved) ACTIVE rule set is available. No clinical values invented/seeded. Remaining blockers: approved clinical reference data/provenance (ADR-040); Steps 4–5 transactional reservations/issuance/fulfillment; full emergency alert delivery (Phase 6).
 ```
 
 ### Review 0 entry

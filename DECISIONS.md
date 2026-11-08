@@ -522,3 +522,21 @@ Every workflow with consequential transitions has explicit allowed transitions a
 **Consequences:** Step 5 can reuse existing transitions; deviation requires explicit review.
 
 **Verification:** `apps/api/src/modules/inventory/domain/unit-state-machine.ts` reviewed; existing inventory/reservation unit tests remain the regression baseline.
+
+## ADR-042 — Phase 5 Step 3 matching API: production policy gate and non-clinical test fixtures
+
+**Status:** Accepted (Phase 5 Step 3 implementation)
+
+**Context:** Step 3 implements request-to-inventory matching and `GET /api/v1/requests/:requestId/matches`. ADR-018/ADR-040 prohibit invented clinical compatibility values and require approved, versioned reference data with human review. No approved clinical dataset is available.
+
+**Decision:**
+- Matching resolves exactly one active compatibility rule set within its effective window and returns `409 MATCHING_POLICY_UNAVAILABLE` (explicit, structured, with `reason`) when policy is missing, inactive, ambiguous, unapproved, or outside the effective window.
+- Production matching remains disabled until an authoritative, human-reviewed compatibility dataset is approved and loaded. The engine is data-driven and never invents clinical values.
+- Non-clinical fixture rule sets (`isNonClinicalFixture=true`) are permitted **only** during automated test execution (`NODE_ENV=test`) against isolated test databases. The policy selector never treats fixtures as production-eligible, and fixtures are never seeded to production.
+- Matching is read-only and advisory: no reservations, no unit state changes, no inventory movements. Responses include `ruleSet` version, matching timestamp, and an operational advisory notice.
+
+**Alternatives considered:** Hard fail always (blocks test coverage of matching behavior); hidden config flag in production env (unsafe bypass risk).
+
+**Consequences:** Tests can verify matching behavior with clearly labeled fixtures in isolated environments while production remains safely blocked. API clients receive an explicit, machine-readable policy-unavailable error rather than fabricated matches.
+
+**Verification:** unit tests for rule-set policy/evaluator/candidate matcher/matching service; API e2e for authz/scope, policy unavailable/inactive, exclusions/FEFO/partial match, and no side effects on isolated PostgreSQL.

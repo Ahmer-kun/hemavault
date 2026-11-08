@@ -64,3 +64,24 @@ export function requestQuantityInvalidError(): AppHttpException {
     'Requested quantity must be a positive integer.',
   );
 }
+
+export function matchingPolicyUnavailableError(
+  reason: string,
+  details: Record<string, unknown> = {},
+): AppHttpException {
+  return new AppHttpException(
+    HttpStatus.CONFLICT,
+    'MATCHING_POLICY_UNAVAILABLE',
+    'Inventory matching is unavailable because no approved active compatibility policy is available for production use. This system must not invent clinical compatibility rules.',
+    { reason, ...details },
+  );
+}
+
+export function matchingRuleSetAmbiguousError(details: Record<string, unknown> = {}): AppHttpException {
+  return new AppHttpException(
+    HttpStatus.CONFLICT,
+    'MATCHING_POLICY_UNAVAILABLE',
+    'Inventory matching cannot proceed because the compatibility policy selection is ambiguous.',
+    { reason: 'AMBIGUOUS_RULE_SET', ...details },
+  );
+}

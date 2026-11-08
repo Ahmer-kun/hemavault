@@ -144,6 +144,72 @@ POST   /api/v1/requests/:requestId/cancel
 GET    /api/v1/requests/:requestId/matches
 ```
 
+### `GET /api/v1/requests/:requestId/matches`
+
+Returns **operational** inventory match candidates for an in-scope request. This endpoint is **read-only** (no reservations, no unit state changes, no inventory movements).
+
+**Authorization:** authenticated session + `request.read` (global or facility-scoped). Facility isolation applies; out-of-scope requests are masked as `404 REQUEST_NOT_FOUND`.
+
+**Query parameters (validated/bounded):**
+- `limitPerLine` (optional, integer, 1–200, default 50): maximum candidate rows returned per request line (eligible candidates are FEFO-ranked first; ineligible candidates may be included with exclusion reasons for operational explanation, subject to the same bound).
+
+**Success response (`200`)** — standard envelope:
+```json
+{
+  "data": {
+    "requestId": "uuid",
+    "facilityId": "uuid",
+    "matchedAt": "ISO-8601 timestamp",
+    "ruleSet": { "id": "uuid", "code": "string", "version": "string", "isNonClinicalFixture": false },
+    "advisoryNotice": "Operational matching only. Not a clinical decision or autonomous approval.",
+    "lines": [
+      {
+        "requestLineId": "uuid",
+        "componentTypeId": "uuid",
+        "componentTypeCategory": "string",
+        "bloodGroupRequired": "A_POS|null",
+        "quantityRequested": 2,
+        "quantityReserved": 0,
+        "quantityIssued": 0,
+        "quantityNeeded": 2,
+        "quantityEligible": 1,
+        "shortfall": 1,
+        "candidates": [
+          {
+            "unitId": "uuid",
+            "publicCode": "UNIT-...",
+            "componentTypeId": "uuid",
+            "bloodGroup": "A_POS",
+            "expiresAt": "ISO-8601",
+            "state": "AVAILABLE",
+            "effectiveState": "AVAILABLE",
+            "eligible": true,
+            "exclusionReasons": [],
+            "fefoRank": 1
+          }
+        ]
+      }
+    ]
+  },
+  "meta": { "requestId": "correlation-id" }
+}
+```
+
+**Matching behavior (operational):**
+- Resolves exactly one approved, active compatibility rule set within its effective window. Records `ruleSet.version` in the response.
+- Evaluates facility-scoped candidate units for the requested component type. Excludes quarantined, recalled, discarded, expired/expired-effective, issued, closed, used, transfer/in-transit/received/collected ineligible states, and units with active reservation claims.
+- Applies approved compatibility rules (data-driven; technical evaluation only). Explains inclusion/exclusion with operational reasons (e.g., `INCOMPATIBLE`, `RESERVED_OR_ACTIVELY_CLAIMED`, `EFFECTIVELY_EXPIRED`, `STATE_QUARANTINED`).
+- Orders eligible candidates by FEFO (`expiresAt` ascending, deterministic tie-breaker).
+- Supports partial matching and reports `quantityNeeded`, `quantityEligible`, and `shortfall`.
+- **No side effects:** never creates reservations, never changes unit states, never writes inventory movements.
+
+**Safety/policy errors (explicit):**
+- `409 MATCHING_POLICY_UNAVAILABLE` (details include `reason`: `MISSING`|`INACTIVE`|`UNAPPROVED`|`OUTSIDE_EFFECTIVE_WINDOW`): no approved active production compatibility policy is available, or policy is inactive/missing/unapproved for production. **Production matching remains disabled until an authoritative, human-reviewed clinical compatibility dataset is approved and loaded** (ADR-018/ADR-040). The system never invents clinical compatibility values.
+- `409 MATCHING_POLICY_UNAVAILABLE` with `reason: AMBIGUOUS_RULE_SET`: policy selection is ambiguous.
+- `404 REQUEST_NOT_FOUND`: request missing or out of scope.
+
+**Medical safety boundary:** results are operational decision support only and require authorized human confirmation for clinical/operational decisions. Non-clinical fixture rule sets are test-only, clearly labeled, and never usable as production policy.
+
 ## Reservation endpoints
 
 ```text

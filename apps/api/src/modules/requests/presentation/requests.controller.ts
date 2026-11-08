@@ -15,6 +15,8 @@ import type { AuthenticatedRequest } from '../../auth/presentation/authenticated
 import type { ActorContext } from '../../rbac/domain/policy';
 import { CurrentActor, RequireAnywhere } from '../../rbac/presentation/permissions.decorators';
 import { RequestService, RequestContext } from '../application/request.service';
+import { MatchingService } from '../../matching/application/matching.service';
+import { RequestMatchesQueryDto } from '../../matching/dto/request-matches.query.dto';
 import { CreateRequestDto } from '../dto/create-request.dto';
 import { UpdateRequestDto } from '../dto/update-request.dto';
 import { RejectRequestDto } from '../dto/reject-request.dto';
@@ -36,7 +38,10 @@ function ctx(req: AuthenticatedRequest): RequestContext {
 
 @Controller('api/v1/requests')
 export class RequestsController {
-  constructor(private readonly requests: RequestService) {}
+  constructor(
+    private readonly requests: RequestService,
+    private readonly matching: MatchingService,
+  ) {}
 
   @Post()
   @RequireAnywhere('request.self.create')
@@ -74,6 +79,20 @@ export class RequestsController {
     @Req() req: AuthenticatedRequest,
   ): Promise<Envelope<unknown>> {
     const data = await this.requests.get(actor, requestId);
+    return { data, meta: { requestId: req.requestId } };
+  }
+
+  @Get(':requestId/matches')
+  @RequireAnywhere('request.read')
+  async matches(
+    @CurrentActor() actor: ActorContext,
+    @Param('requestId') requestId: string,
+    @Query() query: RequestMatchesQueryDto,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<Envelope<unknown>> {
+    const data = await this.matching.getMatches(actor, requestId, {
+      limitPerLine: query.limitPerLine,
+    });
     return { data, meta: { requestId: req.requestId } };
   }
 
