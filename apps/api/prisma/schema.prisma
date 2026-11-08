@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum UserStatus {
@@ -108,6 +109,10 @@ model User {
   screeningsPerformed     DonationScreening[]    @relation("ScreeningScreenedBy")
   deferralsCreated        DonorDeferral[]        @relation("DeferralCreatedBy")
   deferralsResolved       DonorDeferral[]        @relation("DeferralResolvedBy")
+  inventoryMovements      InventoryMovement[]    @relation("InventoryMovementActor")
+  reservationsCreated     Reservation[]          @relation("ReservationCreatedBy")
+  bloodRequestsCreated    BloodRequest[]         @relation("BloodRequestCreatedBy")
+  issuancesCreated        Issuance[]             @relation("IssuanceCreatedBy")
 }
 
 model Session {
@@ -272,8 +277,14 @@ model Facility {
   organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   memberships  FacilityMembership[]
 
-  bloodDrives BloodDrive[]
-  donations   Donation[]
+  bloodDrives        BloodDrive[]
+  donations          Donation[]
+  storageLocations   StorageLocation[]
+  componentUnits     BloodComponentUnit[]
+  reservations       Reservation[]
+  inventoryMovements InventoryMovement[]
+  bloodRequests      BloodRequest[]
+  issuances          Issuance[]
 
   @@index([organizationId])
   @@index([status])
@@ -383,6 +394,7 @@ model Donation {
   campaignRegistration CampaignRegistration? @relation(fields: [campaignRegistrationId], references: [id], onDelete: Restrict)
   createdBy            User?                 @relation("DonationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   screening            DonationScreening?
+  componentUnits       BloodComponentUnit[]
 
   @@index([donorProfileId])
   @@index([facilityId])
@@ -429,7 +441,398 @@ model DonorDeferral {
   @@index([effectiveAt])
 }
 
+model ComponentType {
+  id            String            @id @default(uuid())
+  code          String            @unique
+  name          String
+  category      ComponentCategory
+  description   String?
+  shelfLifeDays Int?
+  isActive      Boolean           @default(true)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  units              BloodComponentUnit[]
+  requestLines       BloodRequestLine[]
+  compatibilityRules CompatibilityRule[]
+
+  @@index([category])
+  @@index([isActive])
+}
+
+model StorageLocation {
+  id          String   @id @default(uuid())
+  facilityId  String
+  code        String
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  facility Facility             @relation(fields: [facilityId], references: [id], onDelete: Restrict)
+  units    BloodComponentUnit[]
+
+  @@unique([facilityId, code])
+  @@index([facilityId])
+  @@index([isActive])
+}
+
+model BloodComponentUnit {
+  id                String     @id @default(uuid())
+  publicCode        String     @unique
+  donationId        String
+  componentTypeId   String
+  facilityId        String
+  storageLocationId String?
+  bloodGroup        BloodGroup
+  state             UnitState  @default(QUARANTINED)
+  volumeMl          Int?
+  collectionAt      DateTime
+  processedAt       DateTime?
+  expiresAt         DateTime
+  releasedAt        DateTime?
+  discardedAt       DateTime?
+  recalledAt        DateTime?
+  receivedAt        DateTime?
+  issuedAt          DateTime?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  donation         Donation            @relation(fields: [donationId], references: [id], onDelete: Restrict)
+  componentType    ComponentType       @relation(fields: [componentTypeId], references: [id], onDelete: Restrict)
+  facility         Facility            @relation(fields: [facilityId], references: [id], onDelete: Restrict)
+  storageLocation  StorageLocation?    @relation(fields: [storageLocationId], references: [id], onDelete: SetNull)
+  movements        InventoryMovement[]
+  reservationItems ReservationItem[]
+  issuanceItems    IssuanceItem[]
+
+  @@index([donationId])
+  @@index([componentTypeId])
+  @@index([facilityId])
+  @@index([storageLocationId])
+  @@index([state])
+  @@index([expiresAt])
+  @@index([bloodGroup])
+}
+
+model InventoryMovement {
+  id             String                @id @default(uuid())
+  unitId         String
+  facilityId     String?
+  actorUserId    String?
+  movementType   InventoryMovementType
+  fromState      UnitState?
+  toState        UnitState?
+  fromFacilityId String?
+  toFacilityId   String?
+  fromLocationId String?
+  toLocationId   String?
+  reservationId  String?
+  transferId     String?
+  issuanceId     String?
+  reason         String?
+  metadata       Json?
+  occurredAt     DateTime              @default(now())
+
+  unit      BloodComponentUnit @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  facility  Facility?          @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  actorUser User?              @relation("InventoryMovementActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([unitId])
+  @@index([facilityId])
+  @@index([actorUserId])
+  @@index([movementType])
+  @@index([occurredAt])
+}
+
+model Reservation {
+  id             String            @id @default(uuid())
+  requestId      String?
+  facilityId     String
+  createdById    String?
+  status         ReservationStatus @default(ACTIVE)
+  idempotencyKey String?
+  expiresAt      DateTime?
+  confirmedAt    DateTime?
+  convertedAt    DateTime?
+  releasedAt     DateTime?
+  cancelledAt    DateTime?
+  ruleSetVersion String?
+  metadata       Json?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  request   BloodRequest?     @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  facility  Facility          @relation(fields: [facilityId], references: [id], onDelete: Restrict)
+  createdBy User?             @relation("ReservationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  items     ReservationItem[]
+  issuances Issuance[]
+
+  @@unique([facilityId, idempotencyKey])
+  @@index([facilityId])
+  @@index([status])
+  @@index([requestId])
+  @@index([createdById])
+}
+
+model ReservationItem {
+  id            String    @id @default(uuid())
+  reservationId String
+  unitId        String
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  releasedAt    DateTime?
+
+  reservation   Reservation        @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  unit          BloodComponentUnit @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  issuanceItems IssuanceItem[]
+
+  @@index([reservationId])
+  @@index([unitId])
+  @@index([isActive])
+}
+
 enum RoleScope {
   GLOBAL
   FACILITY
+}
+
+enum ComponentCategory {
+  WHOLE_BLOOD
+  RED_CELLS
+  PLATELETS
+  PLASMA
+  CRYOPRECIPITATE
+  OTHER
+}
+
+enum UnitState {
+  COLLECTED
+  QUARANTINED
+  AVAILABLE
+  RESERVED
+  TRANSFER_PENDING
+  IN_TRANSIT
+  RECEIVED
+  RECEIVED_BY_DESTINATION
+  ISSUED
+  EXPIRED
+  DISCARDED
+  RECALLED
+  CLOSED
+  USED
+}
+
+enum InventoryMovementType {
+  CREATED
+  STATE_CHANGE
+  LOCATION_MOVE
+  FACILITY_MOVE
+  QUARANTINED
+  RELEASED_TO_AVAILABLE
+  RESERVED
+  RESERVATION_RELEASED
+  ISSUED
+  DISPATCHED
+  RECEIVED
+  EXPIRED
+  DISCARDED
+  RECALLED
+  RECONCILED
+  ADJUSTMENT
+}
+
+enum ReservationStatus {
+  ACTIVE
+  CONFIRMED
+  CONVERTED_TO_ISSUANCE
+  RELEASED
+  CANCELLED
+  EXPIRED
+}
+
+enum RequestUrgency {
+  NORMAL
+  URGENT
+  EMERGENCY
+  CRITICAL
+}
+
+enum BloodRequestStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  RESERVED
+  PARTIALLY_FULFILLED
+  FULFILLED
+  REJECTED
+  CANCELLED
+  EXPIRED
+}
+
+enum IssuanceStatus {
+  CREATED
+  CONFIRMED
+  CANCELLED
+}
+
+enum CompatibilityRuleSetStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+model BloodRequest {
+  id                   String             @id @default(uuid())
+  publicCode           String             @unique
+  facilityId           String
+  requestedByUserId    String?
+  urgency              RequestUrgency     @default(NORMAL)
+  status               BloodRequestStatus @default(DRAFT)
+  requiredByAt         DateTime?
+  patientReferenceCode String?
+  operationalNotes     String?
+  rejectionReason      String?
+  cancellationReason   String?
+  emergencyEscalatedAt DateTime?
+  submittedAt          DateTime?
+  reviewedAt           DateTime?
+  approvedAt           DateTime?
+  rejectedAt           DateTime?
+  cancelledAt          DateTime?
+  fulfilledAt          DateTime?
+  expiredAt            DateTime?
+  ruleSetVersion       String?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  facility     Facility           @relation(fields: [facilityId], references: [id], onDelete: Restrict)
+  requestedBy  User?              @relation("BloodRequestCreatedBy", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  lines        BloodRequestLine[]
+  reservations Reservation[]
+  issuances    Issuance[]
+
+  @@index([facilityId])
+  @@index([requestedByUserId])
+  @@index([status])
+  @@index([urgency])
+  @@index([requiredByAt])
+  @@index([createdAt])
+}
+
+model BloodRequestLine {
+  id                 String      @id @default(uuid())
+  requestId          String
+  componentTypeId    String
+  bloodGroupRequired BloodGroup?
+  quantityRequested  Int
+  quantityReserved   Int         @default(0)
+  quantityIssued     Int         @default(0)
+  notes              String?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  request       BloodRequest  @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  componentType ComponentType @relation(fields: [componentTypeId], references: [id], onDelete: Restrict)
+
+  @@index([requestId])
+  @@index([componentTypeId])
+}
+
+model Issuance {
+  id                   String         @id @default(uuid())
+  publicCode           String         @unique
+  requestId            String?
+  reservationId        String?
+  facilityId           String
+  issuedByUserId       String?
+  status               IssuanceStatus @default(CREATED)
+  issuedAt             DateTime?
+  confirmedAt          DateTime?
+  cancelledAt          DateTime?
+  destinationReference String?
+  notes                String?
+  ruleSetVersion       String?
+  metadata             Json?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  request     BloodRequest?  @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  reservation Reservation?   @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  facility    Facility       @relation(fields: [facilityId], references: [id], onDelete: Restrict)
+  issuedBy    User?          @relation("IssuanceCreatedBy", fields: [issuedByUserId], references: [id], onDelete: SetNull)
+  items       IssuanceItem[]
+
+  @@index([requestId])
+  @@index([reservationId])
+  @@index([facilityId])
+  @@index([issuedByUserId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model IssuanceItem {
+  id                String    @id @default(uuid())
+  issuanceId        String
+  unitId            String
+  reservationItemId String?
+  issuedAt          DateTime?
+  createdAt         DateTime  @default(now())
+
+  issuance        Issuance           @relation(fields: [issuanceId], references: [id], onDelete: Cascade)
+  unit            BloodComponentUnit @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  reservationItem ReservationItem?   @relation(fields: [reservationItemId], references: [id], onDelete: SetNull)
+
+  @@index([issuanceId])
+  @@index([unitId])
+  @@index([reservationItemId])
+}
+
+/// Versioned compatibility reference container. ruleSet payload/rows MUST be reviewed and approved by qualified humans (ADR-018). Do not seed or treat schema defaults as clinical truth.
+model CompatibilityRuleSet {
+  id                   String                     @id @default(uuid())
+  code                 String                     @unique
+  version              String
+  name                 String
+  status               CompatibilityRuleSetStatus @default(DRAFT)
+  sourceReference      String?
+  approvedBy           String?
+  approvedAt           DateTime?
+  isNonClinicalFixture Boolean                    @default(false)
+  notes                String?
+  effectiveFrom        DateTime?
+  effectiveTo          DateTime?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+
+  rules CompatibilityRule[]
+
+  @@unique([code, version])
+  @@index([status])
+  @@index([isNonClinicalFixture])
+}
+
+model CompatibilityRule {
+  id                  String             @id @default(uuid())
+  ruleSetId           String
+  componentCategory   ComponentCategory?
+  componentTypeId     String?
+  recipientBloodGroup BloodGroup?
+  donorBloodGroup     BloodGroup?
+  isCompatible        Boolean            @default(true)
+  priority            Int                @default(0)
+  notes               String?
+  createdAt           DateTime           @default(now())
+
+  ruleSet       CompatibilityRuleSet @relation(fields: [ruleSetId], references: [id], onDelete: Cascade)
+  componentType ComponentType?       @relation(fields: [componentTypeId], references: [id], onDelete: Restrict)
+
+  @@index([ruleSetId])
+  @@index([componentCategory])
+  @@index([componentTypeId])
+  @@index([recipientBloodGroup])
+  @@index([donorBloodGroup])
 }

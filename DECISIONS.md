@@ -451,3 +451,74 @@ Every workflow with consequential transitions has explicit allowed transitions a
 **Consequences:**
 
 **Verification:**
+
+
+## ADR-038 — Phase 5 reservation lifecycle: explicit `CONFIRMED` semantics (request-scoped flow)
+
+**Status:** Accepted (Phase 5 Step 1 alignment)
+
+**Context:** `docs/STATE_MACHINES.md` defines reservation states `ACTIVE -> CONFIRMED -> CONVERTED_TO_ISSUANCE / RELEASED / CANCELLED / EXPIRED`, while the Phase 4 Prisma schema implemented `ReservationStatus` without `CONFIRMED`. `docs/API_CONTRACT.md` exposes request-scoped reservation creation and `POST /api/v1/reservations/:reservationId/confirm`. Phase 5 requires explicit lifecycle semantics and request-scoped reservation commands.
+
+**Decision:**
+- Add `CONFIRMED` to `ReservationStatus` (`ACTIVE, CONFIRMED, CONVERTED_TO_ISSUANCE, RELEASED, CANCELLED, EXPIRED`).
+- Define transitions (enforced by pure domain validators in implementation): `ACTIVE -> CONFIRMED | RELEASED | CANCELLED | EXPIRED`; `CONFIRMED -> CONVERTED_TO_ISSUANCE | RELEASED | CANCELLED | EXPIRED`; terminal states are not reopened.
+- `confirm` is an authorized, auditable staff action that records an explicit operational confirmation/review checkpoint before issuance conversion; it **does not** create clinical approval and **does not** bypass compatibility/quarantine/expiry/facility/authorization checks (ADR-018/021).
+- Reservation commands are **request-scoped** per API contract (`POST /api/v1/requests/:requestId/reservations`), with facility-scoped idempotency and ADR-020 concurrency controls preserved.
+- `Reservation.requestId` becomes an FK-capable field linked to `BloodRequest` (nullable in schema for safe additive rollout; request-scoped reservation domain commands will require a valid in-scope request).
+
+**Alternatives considered:** (1) Map `/confirm` to no-op/idempotent on `ACTIVE` (loses explicit checkpoint). (2) Keep generic body-only reservation API (conflicts with contract and request fulfillment context). (3) Make `requestId` immediately non-nullable (unsafe for any existing rows/tooling assumptions).
+
+**Consequences:** Schema/state-machine/API alignment is explicit; future issuance conversion can require `CONFIRMED` or accept `ACTIVE` per a documented policy choice (must be fixed before Step 5). Existing Phase 4 `ReservationService` tests remain valid; new behavior requires tests.
+
+**Verification (Step 1):** schema enum/fields added and validated; migration prepared for isolated-DB verification. Full behavioral verification deferred to Steps 4–5 tests.
+
+## ADR-039 — Phase 5 request/issuance core entities and fulfillment linkage
+
+**Status:** Accepted (Phase 5 Step 1 schema design)
+
+**Context:** Phase 5 requires hospital/facility requests, lifecycle, urgency, matching, partial fulfillment, reservations tied to requests, and auditable issuance. No request/issuance models existed.
+
+**Decision:**
+- Add `BloodRequest` + `BloodRequestLine` (R5-13: lines even for single-type requests), `RequestUrgency`, and `BloodRequestStatus` aligned to `STATE_MACHINES.md` (terminal/reopen rules enforced in domain validators).
+- Add `Issuance` + `IssuanceItem` linked to facility, optional request/reservation, issuing user, and concrete `BloodComponentUnit` items. `IssuanceItem` may reference `ReservationItem` for traceability.
+- Store fulfillment counters on lines (`quantityReserved`/`quantityIssued`) as transactionally maintained denormalized fields; authoritative fulfillment transitions still require domain validation and consistency checks.
+- Persist `emergencyEscalatedAt`/urgency and audit hooks for ADR-021; notification delivery remains Phase 6.
+- Persist `ruleSetVersion` on request/reservation/issuance where allocation decisions are made (ADR-018).
+
+**Alternatives considered:** Single-item request only (blocks multi-component evolution); computed-only fulfillment without counters (harder to query/index; can be added later as views but counters are practical).
+
+**Consequences:** Additive schema/migration; future services must maintain counter consistency inside transactions. No clinical/patient PHI beyond minimal operational references; logs must not expose sensitive details.
+
+**Verification (Step 1):** Prisma schema models/relations validated; migration pending isolated-DB apply/test. Behavioral and consistency tests deferred to Steps 2–5.
+
+## ADR-040 — Versioned compatibility reference framework; non-clinical fixtures only until approved
+
+**Status:** Accepted (Phase 5 Step 1; implements ADR-018 guardrails)
+
+**Context:** Matching requires configurable compatibility/reference rules, but ADR-018 and `MEDICAL_POLICY_BOUNDARY.md` prohibit inventing clinical compatibility values or treating software output as autonomous clinical approval.
+
+**Decision:**
+- Add `CompatibilityRuleSet` (versioned container, status, provenance/approval metadata, `isNonClinicalFixture`) and `CompatibilityRule` (component/category/type + recipient/donor blood group compatibility rows with priority/notes).
+- Matching engine (later steps) must be version-aware and record `ruleSetVersion` in match/reservation/issuance metadata/audit as applicable.
+- **No clinical compatibility values are invented or seeded as approved data.** Any development/test fixtures must be explicitly marked non-clinical (`isNonClinicalFixture=true`) and documented as unsuitable for production clinical use.
+- Production matching enablement is blocked until an authoritative, human-reviewed compatibility dataset/reference source is approved and loaded through a controlled process.
+
+**Alternatives considered:** Hardcoded compatibility table (violates configurability/traceability); external service (unnecessary complexity).
+
+**Consequences:** Schema supports traceability; implementation can proceed with fixture-driven tests while preserving the medical safety boundary. Operators must not rely on fixture outputs clinically.
+
+**Verification (Step 1):** schema structures added/validated. Engine/fixture labeling and rule-set version recording verified in Steps 3–5 tests.
+
+## ADR-041 — Unit state machine coverage for issuance (Step 1 assessment)
+
+**Status:** Accepted (no change required in Step 1)
+
+**Context:** Step 1 requires assessing whether `unit-state-machine.ts` supports issuance flows.
+
+**Decision:** Current transitions already support the planned issuance path: `RESERVED -> ISSUED` and `ISSUED -> USED | CLOSED` (terminal states). No unit-state-machine changes are made in Step 1. Any future change (e.g., additional receipt/closed semantics) requires a pure domain change, tests, and an ADR/update.
+
+**Alternatives considered:** Preemptively adding transitions (unnecessary; increases risk).
+
+**Consequences:** Step 5 can reuse existing transitions; deviation requires explicit review.
+
+**Verification:** `apps/api/src/modules/inventory/domain/unit-state-machine.ts` reviewed; existing inventory/reservation unit tests remain the regression baseline.

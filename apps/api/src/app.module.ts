@@ -22,6 +22,7 @@ import { DonorsModule } from './modules/donors/donors.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { DonationsModule } from './modules/donations/donations.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
+import { RequestsModule } from './modules/requests/requests.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { InventoryModule } from './modules/inventory/inventory.module';
     CampaignsModule,
     DonationsModule,
     InventoryModule,
+    RequestsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

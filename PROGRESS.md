@@ -97,9 +97,11 @@ Verified findings (2026-09-21):
 
 ## Phase 5 — Requests + Matching + Reservation + Issuance
 
-- [ ] Hospital request implemented.
-- [ ] Request priority/urgency implemented.
-- [ ] Request lifecycle implemented.
+**Planning:** completed 2026-11-07 — see `docs/PHASE_5_PLAN.md`. **Step 1 verified + Step 2 implemented (backend/API) on 2026-11-08** against isolated local PostgreSQL only (`hemavault-test-db`, `postgres:16`, `localhost:5433/hemavault_test`; host positively verified before DB mutations). Step 3+ not started.
+
+- [x] Hospital request implemented. (Step 2: `requests` module, `/api/v1/requests` CRUD/lifecycle endpoints, facility scope, audit, DTO validation, CSRF)
+- [x] Request priority/urgency implemented. (Step 2: `RequestUrgency` persisted/validated; emergency/critical escalation timestamp metadata; no safety-rule bypass)
+- [x] Request lifecycle implemented. (Step 2: pure domain state machine; submit/approve/reject/cancel; contract-aligned compound review transition where `/review` route absent; invalid/terminal transitions rejected)
 - [ ] Configurable compatibility matrix implemented.
 - [ ] Inventory matching service implemented.
 - [ ] FEFO-style allocation implemented where policy permits.
@@ -107,8 +109,8 @@ Verified findings (2026-09-21):
 - [ ] Partial fulfillment implemented.
 - [ ] Issuance implemented.
 - [ ] Fulfillment tracking implemented.
-- [ ] Emergency workflow implemented.
-- [ ] Critical request tests pass.
+- [~] Emergency workflow implemented. (Step 2 urgency/escalation metadata + audit hooks only; full operational alerting/queue delivery deferred to later Phase 5/6 steps per ADR-021)
+- [ ] Critical request tests pass. (Request domain/lifecycle/API/RBAC/isolation/quantity/tx-rollback tests pass; matching/reservation/issuance/concurrency critical-path tests pending Step 3+)
 
 ## Phase 6 — Transfers + Notifications + Real-Time
 
@@ -443,6 +445,90 @@ Decision/ADR reference: ADR-033 (create donation at campaign check-in, not at bo
   screening/quarantine/release/reject machine + structured screen/reject codes), ADR-035 (donor deferral
   policy + resolution model), ADR-036 (ownership-bound self-service vs RequireAnywhere staff routes and 404
   scope masking), ADR-037 (DTOs whitelist shapes; domain emits business-rule codes).
+```
+
+### Phase 5 Step 1 — Domain/contracts alignment + schema design (2026-11-08)
+
+```text
+Date: 2026-11-08
+Phase: Phase 5 Step 1 (domain/contracts alignment and schema design only; NO request/reservation/issuance implementation)
+Approved defaults applied: explicit CONFIRMED reservation semantics (ADR-038); request-scoped reservation commands per API_CONTRACT (ADR-038); versioned compatibility engine with NO invented clinical values, non-clinical fixtures only until authoritative review (ADR-040/ADR-018); backend/API first (frontend deferred); isolated local PostgreSQL only, never Supabase.
+
+Decisions/ADRs recorded (DECISIONS.md): ADR-038 (ReservationStatus CONFIRMED, transitions, confirm semantics, request-scoped commands, nullable Reservation.requestId FK for safe rollout), ADR-039 (BloodRequest/BloodRequestLine, urgency/status lifecycle alignment, Issuance/IssuanceItem, fulfillment counters/traceability, ruleSetVersion, emergency escalation metadata), ADR-040 (CompatibilityRuleSet/CompatibilityRule, provenance/approval metadata, isNonClinicalFixture; production matching blocked pending approved reference data), ADR-041 (unit-state-machine already covers RESERVED->ISSUED, ISSUED->USED/CLOSED; no Step 1 change).
+
+Schema changes (apps/api/prisma/schema.prisma; preserves pre-existing Phase 4/local modifications):
+  - ReservationStatus: added CONFIRMED.
+  - Reservation: added confirmedAt, ruleSetVersion, metadata, request relation to BloodRequest, issuances relation.
+  - User/Facility: added Phase 5 back-relations (bloodRequestsCreated/issuancesCreated, bloodRequests/issuances).
+  - New enums: RequestUrgency, BloodRequestStatus, IssuanceStatus, CompatibilityRuleSetStatus.
+  - New models: BloodRequest, BloodRequestLine, Issuance, IssuanceItem, CompatibilityRuleSet, CompatibilityRule.
+  - Back-relations added: ComponentType.requestLines/compatibilityRules, BloodComponentUnit.issuanceItems, ReservationItem.issuanceItems.
+
+Migration (forward-only, new; historical migrations unchanged):
+  - Created apps/api/prisma/migrations/20261108120000_phase5_domain_contracts_step1/migration.sql
+  - NOT DB-VERIFIED (blocker): Docker Desktop service stopped (com.docker.service Stopped); Docker daemon unavailable, so isolated local PostgreSQL (hemavault-test-db) could not be started/used in this session. Migration has NOT been applied to any database and MUST be verified against isolated local PostgreSQL (migrate deploy/status, schema matches, tests) before further Phase 5 implementation. NEVER deploy to Supabase. Review ALTER TYPE ADD VALUE IF NOT EXISTS 'CONFIRMED' behavior under Prisma migrate transaction semantics on verification.
+
+Validation run (no DB / no Supabase):
+  - prisma validate: PASS (schema valid).
+  - prisma format: PASS.
+  - prisma generate (Prisma Client v6.19.3): PASS.
+  - apps/api tsc --noEmit -p tsconfig.json: PASS.
+  - apps/api npm run build (nest build): PASS.
+  - web npm run build -w @blood-ops/web: PASS.
+  - apps/api npm run test:unit: BLOCKED in this environment — vitest globalSetup (test/global-setup.ts) seeds via Prisma and resolved DATABASE_URL to Supabase host (ENOTFOUND / tenant not found from .env); I did not override to Supabase and did not run against shared/prod DB. No src code changes were made in Step 1 (schema/ADRs/migration/docs only), and tsc/build pass; full unit/e2e regression MUST be re-run against isolated local DB once Docker/local DB is available.
+
+Working tree (preserved unrelated pre-existing changes): D apps/api/.env.example, M apps/api/package.json, M apps/api/prisma.config.ts, M apps/api/prisma/schema.prisma, D apps/web/.env.example, M package-lock.json. Step 1 changes: M DECISIONS.md, M PROGRESS.md, M apps/api/prisma/schema.prisma (additive Phase 5 design on top of existing local modifications), A apps/api/prisma/migrations/20261108120000_phase5_domain_contracts_step1/migration.sql, ?? docs/PHASE_5_PLAN.md (from planning). No historical migrations modified. No secrets exposed.
+
+Remaining blockers before Step 2 (resolved for Step 1 DB verification on 2026-11-08): see "Phase 5 Step 1 migration verification" entry below.
+```
+
+### Phase 5 Step 1 migration verification (2026-11-08)
+
+```text
+Date: 2026-11-08
+Phase: Phase 5 Step 1 verification (DB)
+Environment (isolated local PostgreSQL only; NEVER Supabase): Docker container `hemavault-test-db` (postgres:16-alpine), host `localhost:5433`, database `hemavault_test`, dedicated test credentials. Process env for commands: DATABASE_URL/DIRECT_URL/TEST_DATABASE_URL all pointed to `postgresql://hemavault:***@localhost:5433/hemavault_test?schema=public`. Effective host/port positively verified as `localhost:5433` via Prisma config resolution before any DB mutation. No .env files overwritten/printed; no Supabase migration/test run.
+
+Migration: apps/api/prisma/migrations/20261108120000_phase5_domain_contracts_step1/migration.sql (forward-only; historical migrations unchanged). Reviewed SQL vs schema: additive enums/tables/indexes/FKs for CONFIRMED, BloodRequest/Line, Issuance/Item, CompatibilityRuleSet/Rule, Reservation request linkage; no DROP/TRUNCATE/DELETE/destructive DDL. Phase 4 partial unique index `ReservationItem_unitId_active_unique` preserved.
+
+Commands/results:
+  prisma validate — schema valid.
+  prisma migrate status — 6 migrations found; 20261108120000_phase5_domain_contracts_step1 pending before deploy.
+  prisma migrate deploy (isolated DB only) — applied 20261108120000_phase5_domain_contracts_step1 successfully; "All migrations have been successfully applied."
+  prisma migrate status — "Database schema is up to date!" (6 migrations).
+
+Catalog verification (read-only psql against isolated DB):
+  ReservationStatus enum labels (in order): ACTIVE, CONVERTED_TO_ISSUANCE, RELEASED, CANCELLED, EXPIRED, CONFIRMED (additive; DB enum order shows CONFIRMED appended).
+  Phase 5 tables present: BloodRequest, BloodRequestLine, CompatibilityRule, CompatibilityRuleSet, Issuance, IssuanceItem.
+  Reservation additive columns present (nullable as designed): confirmedAt, metadata, requestId, ruleSetVersion.
+  FK present: Reservation_requestId_fkey.
+  Phase 4 index preserved: ReservationItem_unitId_active_unique (unique, unitId WHERE isActive=true).
+
+Stage 3 regression (isolated DB): npm run test:unit — 17 files/141 passed; npm run test:e2e — 5 files/83 passed (incl. inventory-concurrency 8); npm test — 22 files/224 passed, 0 failed; npx tsc --noEmit -p tsconfig.json — clean; npm run build — success.
+
+Conclusion: Step 1 migration verification complete on isolated local PostgreSQL. No Supabase deployment performed. Remaining blocker for production compatibility matching: approved clinical reference data (ADR-040).
+```
+
+### Phase 5 Step 2 — Request domain + persistence lifecycle (2026-11-08)
+
+```text
+Date: 2026-11-08
+Phase: Phase 5 Step 2 (request domain + persistence lifecycle; backend/API first)
+Scope implemented: apps/api/src/modules/requests/** (domain state machine/constants/errors, DTOs create/update/reject/cancel/list query, repository, RequestService lifecycle, RequestsController), app.module wiring. Endpoints per API_CONTRACT subset: POST/GET/PATCH /api/v1/requests, GET /api/v1/requests/:requestId, POST /requests/:id/submit|approve|reject|cancel. /matches deferred (Step 3).
+
+Key behavior/safety: pure request state machine aligned to STATE_MACHINES; terminal states not reopened; draft-only mutable fields; line/quantity invariants validated (DTO + service); server-side RBAC (request.self.create/read/approve/reject/cancel/review as applicable), facility isolation with 404 masking for out-of-scope resources, CSRF on mutations, structured envelopes/meta.requestId, audit events for create/update/submit/approve/reject/cancel, emergency escalation timestamp metadata for EMERGENCY/CRITICAL (no clinical/safety bypass). Pragmatic contract gap: no /review route in API_CONTRACT; approve/reject perform valid auditable compound transitions (SUBMITTED->UNDER_REVIEW->APPROVED/REJECTED) via conditional status updates.
+
+Tests added: src/modules/requests/domain/request-state-machine.spec.ts, src/modules/requests/application/request.service.spec.ts, test/requests.e2e-spec.ts (isolated local DB). Coverage includes domain transitions, lifecycle, persistence/API flow, facility isolation/404 masking, RBAC/CSRF, invalid transitions, quantity invariants, transaction rollback/DB invariants.
+
+Verification (isolated localhost:5433 only, host verified):
+  npx vitest run src/modules/requests — 2 files/16 passed.
+  npm run test:unit — 19 files/157 passed.
+  npm run test:e2e — 6 files/100 passed (health 4, auth 12, rbac 27, donor-donation 32, inventory-concurrency 8, requests 17).
+  npm test — 25 files/257 passed, 0 failed.
+  npx tsc --noEmit -p tsconfig.json — clean.
+  npm run build (nest build) — success.
+
+Acceptance (Step 2): request create/read/update/list, lifecycle submit/approve/reject/cancel, priority/urgency, facility isolation/RBAC/CSRF/validation/audit, invalid-transition and quantity guards, tx rollback invariant test — verified. Not implemented/deferred: matching (Step 3), request-scoped reservations/issuance/fulfillment commands (Steps 4–5), full emergency alert delivery (Phase 6), frontend, approved clinical compatibility values (ADR-040 blocker).
 ```
 
 ### Review 0 entry
