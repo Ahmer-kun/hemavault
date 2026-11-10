@@ -7,12 +7,15 @@ import { StorageLocationService } from './application/storage-location.service';
 import { ReconciliationService } from './application/reconciliation.service';
 import { ExpiryService } from './application/expiry.service';
 import { ReservationService } from './application/reservation.service';
+import { RequestReservationService } from './application/request-reservation.service';
 import { DonationIntegrationService } from './application/donation-integration.service';
 import { InventoryController } from './presentation/inventory.controller';
+import { ReservationsController } from './presentation/reservations.controller';
+import { CompatibilityRuleSetRepository } from '../matching/infrastructure/compatibility-rule-set.repository';
 
 @Module({
   imports: [AuditModule],
-  controllers: [InventoryController],
+  controllers: [InventoryController, ReservationsController],
   providers: [
     InventoryMovementService,
     UnitService,
@@ -21,9 +24,18 @@ import { InventoryController } from './presentation/inventory.controller';
     ReconciliationService,
     ExpiryService,
     ReservationService,
+    RequestReservationService,
+    DonationIntegrationService,
+    CompatibilityRuleSetRepository,
+  ],
+  exports: [
+    InventoryMovementService,
+    UnitService,
+    ReconciliationService,
+    ExpiryService,
+    ReservationService,
+    RequestReservationService,
     DonationIntegrationService,
   ],
-  exports: [InventoryMovementService, UnitService, ExpiryService, ReservationService, DonationIntegrationService],
 })
 export class InventoryModule {}
-

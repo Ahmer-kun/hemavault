@@ -12,11 +12,14 @@ import {
 } from '@nestjs/common';
 import { CsrfGuard } from '../../auth/presentation/csrf.guard';
 import type { AuthenticatedRequest } from '../../auth/presentation/authenticated-request';
+import { UUIDParamPipe } from '../../../common/http/uuid-param.pipe';
 import type { ActorContext } from '../../rbac/domain/policy';
 import { CurrentActor, RequireAnywhere } from '../../rbac/presentation/permissions.decorators';
 import { RequestService, RequestContext } from '../application/request.service';
 import { MatchingService } from '../../matching/application/matching.service';
 import { RequestMatchesQueryDto } from '../../matching/dto/request-matches.query.dto';
+import { RequestReservationService } from '../../inventory/application/request-reservation.service';
+import { CreateRequestReservationDto } from '../../inventory/dto/create-request-reservation.dto';
 import { CreateRequestDto } from '../dto/create-request.dto';
 import { UpdateRequestDto } from '../dto/update-request.dto';
 import { RejectRequestDto } from '../dto/reject-request.dto';
@@ -41,6 +44,7 @@ export class RequestsController {
   constructor(
     private readonly requests: RequestService,
     private readonly matching: MatchingService,
+    private readonly reservations: RequestReservationService,
   ) {}
 
   @Post()
@@ -75,7 +79,7 @@ export class RequestsController {
   @RequireAnywhere('request.read')
   async get(
     @CurrentActor() actor: ActorContext,
-    @Param('requestId') requestId: string,
+    @Param('requestId', UUIDParamPipe) requestId: string,
     @Req() req: AuthenticatedRequest,
   ): Promise<Envelope<unknown>> {
     const data = await this.requests.get(actor, requestId);
@@ -86,7 +90,7 @@ export class RequestsController {
   @RequireAnywhere('request.read')
   async matches(
     @CurrentActor() actor: ActorContext,
-    @Param('requestId') requestId: string,
+    @Param('requestId', UUIDParamPipe) requestId: string,
     @Query() query: RequestMatchesQueryDto,
     @Req() req: AuthenticatedRequest,
   ): Promise<Envelope<unknown>> {
@@ -96,12 +100,40 @@ export class RequestsController {
     return { data, meta: { requestId: req.requestId } };
   }
 
+  @Post(':requestId/reservations')
+  @RequireAnywhere(['inventory.reserve', 'request.fulfill'], true)
+  @UseGuards(CsrfGuard)
+  async createReservation(
+    @CurrentActor() actor: ActorContext,
+    @Param('requestId', UUIDParamPipe) requestId: string,
+    @Body() dto: CreateRequestReservationDto,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<Envelope<unknown>> {
+    const data = await this.reservations.createForRequest(
+      actor,
+      { requestId, items: dto.items, idempotencyKey: dto.idempotencyKey ?? null },
+      { requestId: req.requestId, ipAddress: req.ip ?? null, userAgent: (req.headers?.['user-agent'] as string) ?? null },
+    );
+    return { data, meta: { requestId: req.requestId } };
+  }
+
+  @Get(':requestId/reservations')
+  @RequireAnywhere(['request.read', 'inventory.read'], true)
+  async listReservations(
+    @CurrentActor() actor: ActorContext,
+    @Param('requestId', UUIDParamPipe) requestId: string,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<Envelope<unknown>> {
+    const data = await this.reservations.listForRequest(actor, requestId);
+    return { data, meta: { requestId: req.requestId } };
+  }
+
   @Patch(':requestId')
   @RequireAnywhere(['request.self.create', 'request.approve'], true)
   @UseGuards(CsrfGuard)
   async update(
     @CurrentActor() actor: ActorContext,
-    @Param('requestId') requestId: string,
+    @Param('requestId', UUIDParamPipe) requestId: string,
     @Body() dto: UpdateRequestDto,
     @Req() req: AuthenticatedRequest,
   ): Promise<Envelope<unknown>> {
@@ -115,7 +147,7 @@ export class RequestsController {
   @HttpCode(200)
   async submit(
     @CurrentActor() actor: ActorContext,
-    @Param('requestId') requestId: string,
+    @Param('requestId', UUIDParamPipe) requestId: string,
     @Req() req: AuthenticatedRequest,
   ): Promise<Envelope<unknown>> {
     const data = await this.requests.submit(actor, requestId, ctx(req));
@@ -128,7 +160,7 @@ export class RequestsController {
   @HttpCode(200)
   async approve(
     @CurrentActor() actor: ActorContext,
-    @Param('requestId') requestId: string,
+    @Param('requestId', UUIDParamPipe) requestId: string,
     @Req() req: AuthenticatedRequest,
   ): Promise<Envelope<unknown>> {
     const data = await this.requests.approve(actor, requestId, ctx(req));
@@ -141,7 +173,7 @@ export class RequestsController {
   @HttpCode(200)
   async reject(
     @CurrentActor() actor: ActorContext,
-    @Param('requestId') requestId: string,
+    @Param('requestId', UUIDParamPipe) requestId: string,
     @Body() dto: RejectRequestDto,
     @Req() req: AuthenticatedRequest,
   ): Promise<Envelope<unknown>> {
@@ -155,7 +187,7 @@ export class RequestsController {
   @HttpCode(200)
   async cancel(
     @CurrentActor() actor: ActorContext,
-    @Param('requestId') requestId: string,
+    @Param('requestId', UUIDParamPipe) requestId: string,
     @Body() dto: CancelRequestDto,
     @Req() req: AuthenticatedRequest,
   ): Promise<Envelope<unknown>> {

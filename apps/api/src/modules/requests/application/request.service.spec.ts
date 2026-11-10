@@ -92,6 +92,94 @@ describe('RequestService', () => {
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'request.created' }));
   });
 
+  it('records an explicit escalation audit action for emergency creation', async () => {
+    repo.findActiveFacility.mockResolvedValue({ id: 'fac-1', organizationId: 'org-1', status: 'ACTIVE', name: 'F', code: 'F1' });
+    const emergencyRow = requestRow(BloodRequestStatus.DRAFT);
+    emergencyRow.urgency = RequestUrgency.EMERGENCY;
+    emergencyRow.emergencyEscalatedAt = new Date();
+    repo.createDraft.mockResolvedValue(emergencyRow);
+    const a = actor({ facilityId: 'fac-1', facilityPerms: ['request.self.create', 'request.read'] });
+    const result = await service.create(
+      a,
+      {
+        facilityId: 'fac-1',
+        urgency: RequestUrgency.EMERGENCY,
+        lines: [{ componentTypeId: 'ct-1', quantityRequested: 1 }],
+      } as any,
+      ctx,
+    );
+    expect(result.urgency).toBe(RequestUrgency.EMERGENCY);
+    expect(result.emergencyEscalatedAt).toBeTruthy();
+    const actions = audit.record.mock.calls.map(([event]: [{ action: string }]) => event.action);
+    expect(actions).toContain('request.created');
+    expect(actions).toContain('request.emergency_escalated');
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'request.emergency_escalated',
+        metadata: expect.objectContaining({
+          urgency: RequestUrgency.EMERGENCY,
+          alertRequired: true,
+          notificationDelivery: 'DEFERRED_PHASE_6',
+        }),
+      }),
+    );
+  });
+
+  it('does not record an escalation audit for normal or urgent requests', async () => {
+    repo.findActiveFacility.mockResolvedValue({ id: 'fac-1', organizationId: 'org-1', status: 'ACTIVE', name: 'F', code: 'F1' });
+    repo.createDraft.mockResolvedValue(requestRow(BloodRequestStatus.DRAFT));
+    const a = actor({ facilityId: 'fac-1', facilityPerms: ['request.self.create', 'request.read'] });
+    await service.create(
+      a,
+      {
+        facilityId: 'fac-1',
+        urgency: RequestUrgency.URGENT,
+        lines: [{ componentTypeId: 'ct-1', quantityRequested: 1 }],
+      } as any,
+      ctx,
+    );
+    const actions = audit.record.mock.calls.map(([event]: [{ action: string }]) => event.action);
+    expect(actions).toContain('request.created');
+    expect(actions).not.toContain('request.emergency_escalated');
+  });
+
+  it('escalates and de-escalates a draft with audit while preserving the first escalation time', async () => {
+    const draft = requestRow(BloodRequestStatus.DRAFT);
+    const escalatedAt = new Date('2026-11-10T09:00:00.000Z');
+    const escalated = requestRow(BloodRequestStatus.DRAFT);
+    escalated.urgency = RequestUrgency.CRITICAL;
+    escalated.emergencyEscalatedAt = escalatedAt;
+    const stillEscalated = requestRow(BloodRequestStatus.DRAFT);
+    stillEscalated.urgency = RequestUrgency.EMERGENCY;
+    stillEscalated.emergencyEscalatedAt = escalatedAt;
+    const downgraded = requestRow(BloodRequestStatus.DRAFT);
+    downgraded.urgency = RequestUrgency.URGENT;
+    downgraded.emergencyEscalatedAt = null;
+
+    repo.findById
+      .mockResolvedValueOnce(draft)
+      .mockResolvedValueOnce(escalated)
+      .mockResolvedValueOnce(stillEscalated);
+    repo.updateDraft
+      .mockResolvedValueOnce(escalated)
+      .mockResolvedValueOnce(stillEscalated)
+      .mockResolvedValueOnce(downgraded);
+
+    const a = actor({ facilityId: 'fac-1', facilityPerms: ['request.read', 'request.self.create'] });
+    const raised = await service.update(a, 'req-1', { urgency: RequestUrgency.CRITICAL } as any, ctx);
+    expect(raised.emergencyEscalatedAt).toEqual(escalatedAt);
+
+    const repeated = await service.update(a, 'req-1', { urgency: RequestUrgency.EMERGENCY } as any, ctx);
+    expect(repeated.emergencyEscalatedAt).toEqual(escalatedAt);
+
+    const lowered = await service.update(a, 'req-1', { urgency: RequestUrgency.URGENT } as any, ctx);
+    expect(lowered.emergencyEscalatedAt).toBeNull();
+
+    const actions = audit.record.mock.calls.map(([event]: [{ action: string }]) => event.action);
+    expect(actions.filter((action: string) => action === 'request.emergency_escalated')).toHaveLength(1);
+    expect(actions.filter((action: string) => action === 'request.emergency_deescalated')).toHaveLength(1);
+  });
+
   it('rejects create with invalid quantity', async () => {
     repo.findActiveFacility.mockResolvedValue({ id: 'fac-1', organizationId: 'org-1', status: 'ACTIVE' });
     const a = actor({ facilityId: 'fac-1', facilityPerms: ['request.self.create'] });

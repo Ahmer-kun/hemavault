@@ -23,12 +23,14 @@ import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { DonationsModule } from './modules/donations/donations.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { RequestsModule } from './modules/requests/requests.module';
+import { IssuanceModule } from './modules/issuance/issuance.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     AppConfigModule,
     PrismaModule,
+    IssuanceModule,
     ThrottlerModule.forRoot([
       {
         ttl: 60_000,

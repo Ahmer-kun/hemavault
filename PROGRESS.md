@@ -97,20 +97,20 @@ Verified findings (2026-09-21):
 
 ## Phase 5 — Requests + Matching + Reservation + Issuance
 
-**Planning:** completed 2026-11-07 — see `docs/PHASE_5_PLAN.md`. **Step 1/2 complete (2026-11-08) and Step 3 complete (2026-11-08, backend/API)** against isolated local PostgreSQL only (`hemavault-test-db`, `postgres:16-alpine`, `localhost:5433/hemavault_test`; host positively verified before DB mutations). No Supabase migrations/tests. Step 4+ not started.
+**Planning:** completed 2026-11-07 - see `docs/PHASE_5_PLAN.md`. **Steps 1-7 complete/verified (2026-11-08 → 2026-11-10)** against isolated local PostgreSQL only (`hemavault-test-db`, `postgres:16-alpine`, `localhost:5433/hemavault_test`; host positively verified before DB mutations). No Supabase migrations/tests. Step 8 (frontend) is an explicit bounded deferral to Phase 8; see ADR-046.
 
 - [x] Hospital request implemented. (Step 2: `requests` module, `/api/v1/requests` CRUD/lifecycle endpoints, facility scope, audit, DTO validation, CSRF)
 - [x] Request priority/urgency implemented. (Step 2: `RequestUrgency` persisted/validated; emergency/critical escalation timestamp metadata; no safety-rule bypass)
 - [x] Request lifecycle implemented. (Step 2: pure domain state machine; submit/approve/reject/cancel; contract-aligned compound review transition where `/review` route absent; invalid/terminal transitions rejected)
 - [x] Configurable compatibility matrix/framework implemented. (Step 3: versioned `CompatibilityRuleSet`/`CompatibilityRule` resolution, effective dates, active/unambiguous/approved selection; **no invented clinical values**. Production matching blocked pending authoritative, human-reviewed dataset — ADR-018/040/042; non-clinical fixtures only in isolated `NODE_ENV=test`.)
 - [x] Inventory matching service implemented. (Step 3: request-scoped read-only matching, operational eligibility/exclusion explanations, rule-set version/timestamp, `GET /api/v1/requests/:requestId/matches`; no reservations/state changes/movements)
-- [~] FEFO-style allocation implemented where policy permits. (Step 3: FEFO candidate ordering for eligible matches implemented; transactional reservation/allocation command deferred to Step 4)
-- [ ] Reservation command implemented transactionally.
-- [ ] Partial fulfillment implemented. (Step 3 matching reports quantity needed/eligible/shortfall; request-scoped reservation fulfillment deferred to Step 4)
-- [ ] Issuance implemented.
-- [ ] Fulfillment tracking implemented. (Step 2 line counters/structure exist; transactional reservation/issuance updates deferred to Steps 4–5)
-- [~] Emergency workflow implemented. (Step 2 urgency/escalation metadata + audit hooks only; full operational alerting/queue delivery deferred to later Phase 5/6 steps per ADR-021)
-- [~] Critical request tests pass. (Request lifecycle + Step 3 matching/compatibility/policy/RBAC/isolation/exclusions/FEFO/partial/no-side-effects tests pass on isolated DB; transactional reservation/issuance/concurrency critical-path tests pending Steps 4–5)
+- [x] FEFO-style allocation implemented where policy permits. (Step 3: FEFO candidate ordering for eligible matches implemented; Step 4: transactional request-scoped reservation consumes only eligible units and preserves compatibility/expiry/facility/claim checks.)
+- [x] Reservation command implemented transactionally. (Step 4: `RequestReservationService` request-scoped create/get/list/release/confirm/cancel; deterministic `FOR UPDATE` locking; partial unique active-claim invariant; facility-scoped idempotency; movement ledger + audit; 404 masking; concurrency e2e 8/8.)
+- [x] Partial fulfillment implemented. (Steps 4-5: per-line reserved/issued counters with SQL guards; request status recomputation to RESERVED / PARTIALLY_FULFILLED / FULFILLED via canonical state machine; partial issuance covered by e2e.)
+- [x] Issuance implemented. (Step 5: staged `CREATED` issuance then transactional `confirm` via `InventoryMovementService` (`RESERVED → ISSUED`), plus `cancel` limited to unconfirmed issuances; facility authorization, idempotency, expiry/quarantine/recall/discard rejection, audit, rollback and duplicate-issuance protections. Issuance HTTP/authz/CSRF/malformed-ID hardening covered in Step 7.)
+- [x] Fulfillment tracking implemented. (Step 5: line issued/counter updates, request status recomputation to RESERVED/PARTIALLY_FULFILLED/FULFILLED based on line counters; confirmed issuance cannot be reversed because ISSUED units cannot return to AVAILABLE - ADR-041/043.)
+- [x] Emergency workflow implemented. (Step 6: urgency-first queue ordering, explicit `request.emergency_escalated` / `request.emergency_deescalated` audit events with `alertRequired`/`DEFERRED_PHASE_6` delivery metadata; priority never bypasses compatibility, authorization, expiration, quarantine, recall, discard, facility, reservation, or issuance rules. Actual notification delivery remains Phase 6 per ADR-021/045.)
+- [x] Critical request tests pass. (Steps 4-7 verified on isolated PostgreSQL: reservation concurrency 8/8, issuance 14/14, emergency 6/6, request lifecycle/RBAC/CSRF/isolation/hardening; full `npm test` 35 files / 341 tests, 0 failed; tsc/build clean.)
 
 ## Phase 6 — Transfers + Notifications + Real-Time
 
@@ -558,6 +558,77 @@ Verification (isolated localhost:5433 only):
   npm run build (nest build) — success.
 
 Production compatibility policy status: MATCHING DISABLED FOR PRODUCTION until authoritative, human-reviewed clinical compatibility reference dataset is approved/loaded and a production-eligible (non-fixture, approved) ACTIVE rule set is available. No clinical values invented/seeded. Remaining blockers: approved clinical reference data/provenance (ADR-040); Steps 4–5 transactional reservations/issuance/fulfillment; full emergency alert delivery (Phase 6).
+```
+
+### Phase 5 Step 4 — Transactional request reservation (2026-11-08 → 2026-11-10)
+
+```text
+Date: 2026-11-08 (implementation) / 2026-11-10 (verified)
+Phase: Phase 5 Step 4 (request-scoped transactional reservation lifecycle)
+Scope implemented (backend/API): apps/api/src/modules/inventory/application/request-reservation.service.ts; presentation/reservations.controller.ts; DTOs (create/release/cancel/confirm); ReservationItem.requestLineId relation in prisma/schema.prisma; RequestsController reservation routes; RequestsModule/InventoryModule wiring; docs/API_CONTRACT.md reservation section.
+Endpoints: POST/GET /api/v1/requests/:requestId/reservations; GET /api/v1/reservations/:reservationId; POST /api/v1/reservations/:reservationId/{release,confirm,cancel}.
+
+Migration: forward-only 20261108180000_phase5_step4_reservation_line_linkage — adds nullable ReservationItem.requestLineId + index + FK to BloodRequestLine ON DELETE RESTRICT. Historical migrations untouched; no destructive commands; no Supabase.
+
+Safety/controls: request-scoped create/list/get/release/confirm/cancel; deterministic FOR UPDATE locking on units and lines; Phase 4 partial unique active-claim invariant preserved; facility-scoped idempotency (same key returns original reservation); only AVAILABLE, unexpired, compatible, in-facility, unclaimed units; per-line reserved-quantity SQL guards prevent over-reservation; request status RESERVED/PARTIALLY_FULFILLED via canonical state machine; immutable inventory movements + audit; 404 masking for out-of-scope resources; inventory.reserve/request.fulfill authorization + CSRF.
+
+Tests (isolated DB): test/request-reservation-concurrency.e2e-spec.ts 8/8 (simultaneous same-unit claim → exactly one active claim; multi-unit/partial quantities; idempotent retry no duplicates; distinct keys; expired-unit rejection; DB partial unique index; facility isolation; 8-way invariant; tx rollback atomicity). Service/domain unit coverage in src/modules/inventory.
+Deferred: issuance consumption of reservations (Step 5), emergency ordering/escalation (Step 6).
+```
+
+### Phase 5 Step 5 — Issuance workflow + fulfillment completion (2026-11-10)
+
+```text
+Date: 2026-11-10
+Phase: Phase 5 Step 5 (staged issuance, confirmation, cancellation, fulfillment tracking)
+Scope implemented (backend/API): apps/api/src/modules/issuance/** (issuance-workflow.ts pure rules + spec, IssuanceService, DTOs, IssuancesController, IssuanceModule); app.module.ts wiring; test/issuance.e2e-spec.ts; docs/API_CONTRACT.md issuance section; ADR-043.
+Endpoints: POST/GET /api/v1/requests/:requestId/issuances; GET /api/v1/issuances/:issuanceId; POST /api/v1/issuances/:issuanceId/{confirm,cancel}.
+
+Workflow (ADR-043, two-phase): POST stages CREATED issuance for active reservation items (items[] of {reservationItemId}, same-reservation constraint, optional facility-scoped idempotencyKey) — no unit state/counter/ledger mutation. POST /:id/confirm revalidates eligibility under row locks, records ISSUED movements via InventoryMovementService (RESERVED → ISSUED), deactivates reservation items, decrements reserved / increments issued counters with SQL guards, recomputes request status (RESERVED → PARTIALLY_FULFILLED → FULFILLED), audits; idempotent for already-CONFIRMED. POST /:id/cancel only valid while CREATED; confirmed issuances cannot be reversed (ISSUED cannot return to AVAILABLE).
+
+Migration: forward-only 20261110120000_phase5_step5_issuance_idempotency — adds nullable Issuance.idempotencyKey + @@unique([facilityId, idempotencyKey]). Null keys remain distinct per PostgreSQL semantics. Historical migrations untouched; no Supabase.
+
+Safety/controls: rejects unreserved/inactive/unknown items, cross-facility tampering, duplicate issuance, over-quantity, expired/recalled/quarantined/discarded units, counter conflicts, multi-reservation spans; transactional rollback; explicit structured error codes; facility authorization + CSRF.
+
+Tests (isolated DB): src/modules/issuance/domain/issuance-workflow.spec.ts 6/6; test/issuance.e2e-spec.ts 14/14 (staged→confirm with movements/audit; partial issuance/counters; unreserved/inactive/unknown rejection; expired/recalled/quarantined/discarded rejection; cross-facility masking/tamper; duplicate issuance; over-quantity; idempotency; cancellation semantics; rollback).
+Deferred: post-issuance reversal/disposal correction workflow (separate clinical/disposal scope, ADR-041); emergency ordering/escalation (Step 6).
+```
+
+### Phase 5 Step 6 — Emergency workflow semantics + alert hooks (2026-11-10)
+
+```text
+Date: 2026-11-10
+Phase: Phase 5 Step 6 (priority/urgency, auditable escalation, urgency-first operational queue)
+Scope implemented (backend/API): apps/api/src/modules/requests/domain/request-priority.ts (+ spec); RequestService escalation/de-escalation audit integration; urgency-first request repository ordering; test/request-emergency.e2e-spec.ts; ADR-045.
+Behavior: queue order urgency DESC → requiredByAt ASC NULLS LAST → createdAt ASC. EMERGENCY/CRITICAL set emergencyEscalatedAt and emit request.emergency_escalated with alertRequired:true and notificationDelivery:'DEFERRED_PHASE_6'; repeat emergency updates preserve first timestamp without duplicate audit; downgrade clears timestamp and emits request.emergency_deescalated.
+Safety: urgency is ordering/escalation metadata only — never bypasses compatibility, authorization, facility scope, expiry, quarantine, recall, discard, reservation locking, or issuance validation.
+Tests (isolated DB): requests domain/application unit 27/27 (incl. request-priority rules); test/request-emergency.e2e-spec.ts 6/6. Full regression at this point: unit 198/198, e2e 137/137.
+Database: no schema/migration changes; no Supabase.
+Deferred: actual notification/alert delivery (Phase 6, ADR-021/045).
+```
+
+### Phase 5 Step 7 — API hardening + contract alignment (2026-11-10)
+
+```text
+Date: 2026-11-10
+Phase: Phase 5 Step 7 (validation/authz/CSRF/masking hardening, contract alignment, security sweep)
+Scope implemented: apps/api/src/common/http/uuid-param.pipe.ts (shared ParseUUIDPipe) applied to Phase 5 request/issuance/reservation path params; @ArrayMaxSize(50) on request create/update line arrays and issuance items; bounded reservation list (take:100); docs/API_CONTRACT.md reservation/issuance sections aligned to actual routes/semantics/error codes; six hardening e2e tests added to test/requests.e2e-spec.ts.
+Findings fixed: malformed UUID path params previously risked opaque Prisma 500 INTERNAL_ERROR → now 400 BAD_REQUEST with request ID; unbounded request line/issuance item arrays → bounded; unbounded reservation list → bounded; create mass-assignment (status/emergencyEscalatedAt) confirmed ignored by whitelist validation.
+Residual limitation: global throttler remains 100 req/min with no dedicated per-route throttle for matching/reservation/issuance — Phase 9 hardening candidate; no auth bypass observed.
+Tests (isolated DB): malformed IDs → 400; unknown well-formed IDs → masked 404; issuance auth + CSRF; issuance permission denial; cross-facility masking + request-state guard; line-array bound + mass-assignment. Full regression: unit 198/198, e2e 143/143, npm test 35 files/341 passed 0 failed, tsc --noEmit clean, nest build success, web build success.
+Database: no schema/migration changes; no Supabase.
+```
+
+### Phase 5 Step 8 — Frontend bounded deferral (2026-11-10)
+
+```text
+Date: 2026-11-10
+Phase: Phase 5 Step 8 (minimal frontend integration or explicit bounded deferral)
+Decision: DEFERRED to Phase 8 (ADR-046). Not implemented in Phase 5; no frontend completion claimed.
+Finding: apps/web is a health-only shell — App.tsx, features/system/SystemStatus.tsx, lib/api/health.ts, app/QueryProvider.tsx, styles, test setup. No auth/session/cookie handling, no CSRF client, no routing/navigation, no Phase 5 API client, no accessible operator components. A Phase 5 UI would require net-new auth/session/CSRF/routing infrastructure and would pre-empt Phase 8 design-system/accessibility work.
+Acceptance evidence: backend/API is authoritative for Phase 5 — server-side RBAC, validation, structured errors, audit, immutable movements, and automated tests on isolated PostgreSQL. docs/API_CONTRACT.md documents the stable contract for Phase 8.
+Verification: apps/web file inventory; npm run build -w @blood-ops/web success for existing shell; API gates (unit 198/198, e2e 143/143, full npm test 341/341, tsc clean, nest build success) on isolated PostgreSQL.
+Remaining blockers/limitations: approved clinical compatibility dataset (production matching disabled, ADR-018/040/042); notification/alert delivery (Phase 6); per-route rate limiting (Phase 9); operator UI (Phase 8).
 ```
 
 ### Review 0 entry

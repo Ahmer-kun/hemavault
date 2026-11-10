@@ -215,20 +215,33 @@ Returns **operational** inventory match candidates for an in-scope request. This
 ```text
 POST   /api/v1/requests/:requestId/reservations
 GET    /api/v1/requests/:requestId/reservations
+GET    /api/v1/reservations/:reservationId
 POST   /api/v1/reservations/:reservationId/release
 POST   /api/v1/reservations/:reservationId/confirm
+POST   /api/v1/reservations/:reservationId/cancel
 ```
 
-A reservation command must be idempotent where practical.
+Reservation commands are transactional and facility-scoped. Creation accepts a bounded `items[]` of `{ unitId, requestLineId }` plus an optional facility-scoped `idempotencyKey`; retries with the same key return the original reservation. Only `AVAILABLE`, unexpired, compatible units belonging to the request facility may be reserved. Mutations require `inventory.reserve` or `request.fulfill` (global or facility-scoped) and CSRF. Out-of-scope resources are masked as `404 REQUEST_NOT_FOUND` / `404 RESERVATION_NOT_FOUND`.
 
 ## Issuance endpoints
 
 ```text
 POST   /api/v1/requests/:requestId/issuances
+GET    /api/v1/requests/:requestId/issuances
 GET    /api/v1/issuances/:issuanceId
-POST   /api/v1/issuances/:issuanceId/dispatch
-POST   /api/v1/issuances/:issuanceId/receive
+POST   /api/v1/issuances/:issuanceId/confirm
+POST   /api/v1/issuances/:issuanceId/cancel
 ```
+
+Issuance is a two-phase, authorized, auditable workflow:
+
+1. `POST /requests/:requestId/issuances` creates a staged `CREATED` issuance for one or more active reservation items. Staging does **not** mutate unit state, request line counters, or the inventory ledger, so operators can review before committing. The body accepts `items[]` of `{ reservationItemId }` (bounded to 50, unique) and an optional facility-scoped `idempotencyKey`. Items must belong to the same reservation for the request.
+2. `POST /issuances/:issuanceId/confirm` performs the transactional conversion: revalidates state/facility/compatibility/expiry/quarantine/recall/discard eligibility under row locks, records `ISSUED` inventory movements, marks reservation items inactive, decrements reserved / increments issued counters, recomputes request fulfillment status (`RESERVED` → `PARTIALLY_FULFILLED` → `FULFILLED`), and audits the action. Confirmation is idempotent for an already `CONFIRMED` issuance.
+3. `POST /issuances/:issuanceId/cancel` cancels a `CREATED` issuance only. Confirmed issuances cannot be reversed because `ISSUED` units cannot return to `AVAILABLE` (ADR-041); operators must handle such cases through documented operational correction, not silent state rollback.
+
+Both commands require `inventory.issue` or `request.fulfill` (global or facility-scoped) and CSRF. Malformed path identifiers return `400 BAD_REQUEST`; missing or out-of-scope resources return masked `404` errors.
+
+**Issuance errors (explicit):** `REQUEST_NOT_ISSUABLE`, `RESERVATION_NOT_ISSUABLE`, `RESERVATION_ITEM_NOT_FOUND`, `RESERVATION_ITEM_NOT_ACTIVE`, `FACILITY_SCOPE_VIOLATION`, `UNIT_NOT_ALLOCATABLE`, `UNIT_LINE_MISMATCH`, `LINE_BELONGS_TO_DIFFERENT_REQUEST`, `EXCEEDS_REMAINING`, `DOUBLE_ISSUANCE`, `IDEMPOTENCY_KEY_CONFLICT`, `ITEMS_SPAN_MULTIPLE_RESERVATIONS`, `FULFILLMENT_COUNTER_CONFLICT`, `ISSUANCE_NOT_CONFIRMABLE`, `ISSUANCE_NOT_CANCELLABLE`, `ISSUANCE_HAS_NO_ITEMS`, `ISSUANCE_NOT_LINKED`.
 
 ## Transfer endpoints
 

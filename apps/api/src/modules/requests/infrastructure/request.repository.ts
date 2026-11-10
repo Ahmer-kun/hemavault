@@ -47,7 +47,13 @@ export class RequestRepository {
       this.prisma.bloodRequest.findMany({
         where,
         include: requestInclude,
-        orderBy: [{ createdAt: 'desc' }],
+        // Operational queue order (Phase 5 Step 6): highest urgency first, then
+        // earliest required-by (missing last), then oldest request first.
+        orderBy: [
+          { urgency: 'desc' },
+          { requiredByAt: { sort: 'asc', nulls: 'last' } },
+          { createdAt: 'asc' },
+        ],
         take: input.limit,
         skip: input.offset,
       }),

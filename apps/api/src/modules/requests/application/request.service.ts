@@ -19,6 +19,10 @@ import {
   canTransitionRequest,
   isTerminalRequestStatus,
 } from '../domain/request-state-machine';
+import {
+  EscalationDecision,
+  resolveEmergencyEscalation,
+} from '../domain/request-priority';
 import { RequestRepository, RequestWithDetails } from '../infrastructure/request.repository';
 import { CreateRequestDto } from '../dto/create-request.dto';
 import { UpdateRequestDto } from '../dto/update-request.dto';
@@ -152,10 +156,59 @@ export class RequestService {
     throw requestNotFoundError(); // 404 masking
   }
 
-  private emergencyEscalatedAt(urgency: RequestUrgency): Date | null {
-    return urgency === RequestUrgency.EMERGENCY || urgency === RequestUrgency.CRITICAL
-      ? new Date()
-      : null;
+  private escalationMetadata(
+    decision: EscalationDecision,
+    urgency: RequestUrgency,
+    extra: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      urgency,
+      alertRequired: true,
+      notificationDelivery: 'DEFERRED_PHASE_6',
+      escalatedAt: decision.emergencyEscalatedAt?.toISOString() ?? null,
+      ...extra,
+    };
+  }
+
+  private async recordEmergencyEscalation(
+    actor: ActorContext,
+    request: RequestView,
+    req: RequestContext,
+    decision: EscalationDecision,
+    previousUrgency: RequestUrgency | null,
+  ): Promise<void> {
+    if (decision.escalated) {
+      await this.auditService.record({
+        actorUserId: actor.userId,
+        action: REQUEST_ACTIONS.EMERGENCY_ESCALATED,
+        targetType: 'BloodRequest',
+        targetId: request.id,
+        organizationId: request.facility.organizationId,
+        facilityId: request.facility.id,
+        requestId: req.requestId,
+        ipAddress: req.ipAddress,
+        userAgent: req.userAgent,
+        metadata: this.escalationMetadata(decision, request.urgency, {
+          requiredByAt: request.requiredByAt?.toISOString() ?? null,
+          previousUrgency,
+        }),
+      });
+      return;
+    }
+    if (decision.deescalated) {
+      await this.auditService.record({
+        actorUserId: actor.userId,
+        action: REQUEST_ACTIONS.EMERGENCY_DEESCALATED,
+        targetType: 'BloodRequest',
+        targetId: request.id,
+        organizationId: request.facility.organizationId,
+        facilityId: request.facility.id,
+        requestId: req.requestId,
+        ipAddress: req.ipAddress,
+        userAgent: req.userAgent,
+        metadata: { urgency: request.urgency, previousUrgency },
+      });
+    }
   }
 
   async create(actor: ActorContext, dto: CreateRequestDto, req: RequestContext): Promise<RequestView> {
@@ -169,6 +222,7 @@ export class RequestService {
       }
     }
     const urgency = dto.urgency ?? RequestUrgency.NORMAL;
+    const escalation = resolveEmergencyEscalation(urgency, null);
     const created = await this.repository.createDraft({
       publicCode: generatePublicCode(REQUEST_PUBLIC_CODE_PREFIX),
       facilityId: dto.facilityId,
@@ -177,7 +231,7 @@ export class RequestService {
       requiredByAt: dto.requiredByAt ? new Date(dto.requiredByAt) : null,
       patientReferenceCode: dto.patientReferenceCode?.trim() || null,
       operationalNotes: dto.operationalNotes?.trim() || null,
-      emergencyEscalatedAt: this.emergencyEscalatedAt(urgency),
+      emergencyEscalatedAt: escalation.emergencyEscalatedAt,
       lines: dto.lines.map((l) => ({
         componentTypeId: l.componentTypeId,
         bloodGroupRequired: l.bloodGroupRequired ?? null,
@@ -197,7 +251,9 @@ export class RequestService {
       userAgent: req.userAgent,
       metadata: { urgency, emergency: !!created.emergencyEscalatedAt },
     });
-    return this.view(created);
+    const view = this.view(created);
+    await this.recordEmergencyEscalation(actor, view, req, escalation, null);
+    return view;
   }
 
   async list(
@@ -241,6 +297,10 @@ export class RequestService {
       }
     }
     const urgency = dto.urgency ?? request.urgency;
+    const escalation = resolveEmergencyEscalation(urgency, {
+      urgency: request.urgency,
+      emergencyEscalatedAt: request.emergencyEscalatedAt,
+    });
     const updated = await this.repository.updateDraft(id, {
       urgency,
       requiredByAt: dto.requiredByAt !== undefined ? (dto.requiredByAt ? new Date(dto.requiredByAt) : null) : undefined,
@@ -248,7 +308,7 @@ export class RequestService {
         dto.patientReferenceCode !== undefined ? dto.patientReferenceCode?.trim() || null : undefined,
       operationalNotes: dto.operationalNotes !== undefined ? dto.operationalNotes?.trim() || null : undefined,
       emergencyEscalatedAt:
-        dto.urgency !== undefined ? this.emergencyEscalatedAt(urgency) : undefined,
+        dto.urgency !== undefined ? escalation.emergencyEscalatedAt : undefined,
       lines: dto.lines?.map((l) => ({
         componentTypeId: l.componentTypeId,
         bloodGroupRequired: l.bloodGroupRequired ?? null,
@@ -268,7 +328,15 @@ export class RequestService {
       userAgent: req.userAgent,
       metadata: { urgency: updated.urgency },
     });
-    return this.view(updated);
+    const view = this.view(updated);
+    await this.recordEmergencyEscalation(
+      actor,
+      view,
+      req,
+      escalation,
+      dto.urgency !== undefined ? request.urgency : null,
+    );
+    return view;
   }
 
   private async transitionScoped(

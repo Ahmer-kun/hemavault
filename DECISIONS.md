@@ -540,3 +540,72 @@ Every workflow with consequential transitions has explicit allowed transitions a
 **Consequences:** Tests can verify matching behavior with clearly labeled fixtures in isolated environments while production remains safely blocked. API clients receive an explicit, machine-readable policy-unavailable error rather than fabricated matches.
 
 **Verification:** unit tests for rule-set policy/evaluator/candidate matcher/matching service; API e2e for authz/scope, policy unavailable/inactive, exclusions/FEFO/partial match, and no side effects on isolated PostgreSQL.
+
+## ADR-043 — Two-phase issuance with non-reversible confirmation
+
+**Status:** Accepted (Phase 5 Step 5 implementation)
+
+**Context:** Issuance consumes reserved units and drives request fulfillment. Operators need a review step before inventory leaves the available pool, and the unit state machine only allows `RESERVED → ISSUED → USED|CLOSED` (ADR-041), with no path from `ISSUED` back to `AVAILABLE`.
+
+**Decision:**
+- Issuance is two-phase. `POST /api/v1/requests/:requestId/issuances` creates a staged `CREATED` issuance referencing active reservation items and performs **no** unit-state, counter, or ledger mutation. `POST /api/v1/issuances/:issuanceId/confirm` is the only transition that records `ISSUED` movements, updates line counters, deactivates reservation items, and recomputes request fulfillment status.
+- Confirmation is transactional and revalidates all eligibility (state, facility, compatibility, expiry, quarantine, recall, discard) under row locks immediately before committing.
+- Cancellation is valid only while the issuance is `CREATED`. A `CONFIRMED` issuance cannot be cancelled or reversed, because issued units cannot return to `AVAILABLE`. Any post-issuance correction is a separate clinical/disposal workflow that is explicitly out of scope here.
+- Confirmation is idempotent for an already-`CONFIRMED` issuance; staging and confirmation both require facility authorization and CSRF.
+
+**Alternatives considered:** Single-step issuance (loses the operator review gate and makes partial-error recovery ambiguous); allowing `ISSUED → AVAILABLE` reversal (violates the audited unit lifecycle and risks silent inventory resurrection).
+
+**Consequences:** Operators can stage and inspect issuances before committing, partial issuance is natural, and the immutable movement ledger reflects exactly what was issued. Corrections require a documented downstream workflow rather than a hidden rollback.
+
+**Verification:** `apps/api/test/issuance.e2e-spec.ts` (14/14) plus `issuance-workflow.spec.ts` (6/6): staged-then-confirm fulfillment, partial issuance/counters, eligibility rejections, cross-facility tampering, duplicate/over-quantity, idempotency, cancellation semantics, rollback.
+
+## ADR-044 — Facility-scoped idempotency keys for reservations and issuances
+
+**Status:** Accepted (Phase 5 Steps 4–5 implementation)
+
+**Context:** Reservation and issuance are retry-prone multi-write commands (mobile/network retries, operator double-submit). The existing `Reservation` model carried a facility-scoped idempotency convention, but `Issuance` had no durable idempotency anchor, risking duplicate fulfillment.
+
+**Decision:**
+- Both reservation and issuance commands accept an optional `idempotencyKey`, unique per facility: `Reservation` already enforces this, and a forward-only migration `20261110120000_phase5_step5_issuance_idempotency` adds nullable `Issuance.idempotencyKey` with `@@unique([facilityId, idempotencyKey])`.
+- A retry with the same `(facilityId, idempotencyKey)` returns the original record instead of creating a duplicate or re-executing side effects. Null keys remain distinct under PostgreSQL unique-index semantics, so the constraint is opt-in.
+- Reusing a key for a materially different command is rejected with `IDEMPOTENCY_KEY_CONFLICT` rather than silently returning an unrelated record.
+
+**Alternatives considered:** Global idempotency keys (cross-facility collisions and information leakage); no idempotency (duplicate issuance risk); application-memory dedupe (not durable, not multi-instance safe).
+
+**Consequences:** Retries are safe and auditable without changing existing null-key behavior. The unique index is additive and forward-only; historical migrations were not modified.
+
+**Verification:** reservation idempotent-retry cases in `request-reservation-concurrency.e2e-spec.ts`; issuance idempotency/conflict cases in `issuance.e2e-spec.ts`; `prisma validate` and `migrate status` (8 migrations, up to date) on isolated PostgreSQL.
+
+## ADR-045 — Emergency priority and escalation semantics
+
+**Status:** Accepted (Phase 5 Step 6 implementation)
+
+**Context:** Emergency/critical requests must surface first operationally and be auditable, but ADR-018/ADR-021 prohibit priority from bypassing safety, compatibility, authorization, or inventory controls. Notification delivery does not yet exist (Phase 6).
+
+**Decision:**
+- The operational request queue orders by `urgency DESC` (so CRITICAL/EMERGENCY precede URGENT/NORMAL), then `requiredByAt ASC NULLS LAST`, then `createdAt ASC` (stable age tie-break).
+- Creating or updating a request to `EMERGENCY`/`CRITICAL` sets `emergencyEscalatedAt` and emits `request.emergency_escalated` with metadata `alertRequired: true` and `notificationDelivery: 'DEFERRED_PHASE_6'`. Repeated emergency updates preserve the first escalation timestamp and do not emit duplicate escalation audits. A downgrade clears the timestamp and emits `request.emergency_deescalated`.
+- Urgency is metadata/ordering only. It never bypasses compatibility matching, authorization, facility scope, expiry, quarantine, recall, discard, reservation locking, or issuance validation.
+
+**Alternatives considered:** Hard-coded urgency-first ordering in SQL only (untestable as a pure rule); auto-approving emergency requests (unsafe clinical/authorization bypass); blocking emergency features until Phase 6 notifications exist (unnecessary coupling).
+
+**Consequences:** Emergencies are visibly prioritized and auditable now, while delivery/alerting remains a clean Phase 6 responsibility. Safety invariants stay uniform across all urgencies.
+
+**Verification:** `request-priority.ts` unit tests plus `request-emergency.e2e-spec.ts` (6/6) on isolated PostgreSQL; requests domain/application unit suite 27/27.
+
+## ADR-046 — Phase 5 frontend explicitly deferred to Phase 8
+
+**Status:** Accepted (Phase 5 Step 8 decision record)
+
+**Context:** Step 8 allows a minimal operator UI **or** a bounded deferral. `apps/web` currently contains only a health-status shell (`App.tsx`, `SystemStatus`, health API helper, TanStack Query provider, styles, test setup). It has no auth/session/cookie handling, CSRF client, routing/navigation, API client for Phase 5 resources, or accessible operator components.
+
+**Decision:**
+- Phase 5 frontend work is explicitly deferred to Phase 8. Implementing requests/reservations/issuance UI now would require net-new auth/session/CSRF/routing infrastructure and would pre-empt the Phase 8 design-system and accessibility work.
+- Phase 5 acceptance evidence is the backend/API surface: authorization enforced server-side, validation, structured errors, audit, immutable movements, and automated tests on isolated PostgreSQL.
+- No frontend completion is claimed for Phase 5. The API contract is stable and documented (`docs/API_CONTRACT.md`) so Phase 8 can build on it without backend churn.
+
+**Alternatives considered:** A minimal non-auth preview UI (misleading, insecure if wired to real endpoints); partial UI with ad-hoc auth (duplicates and undermines Phase 8 architecture).
+
+**Consequences:** Phase 5 stays bounded and honest about scope; Phase 8 owns the operator experience with the required auth/CSRF/routing foundations already available from the backend.
+
+**Verification:** `apps/web` inventory review (files listed above); `npm run build -w @blood-ops/web` succeeds for the existing shell; API `npm test` 35 files / 341 tests, `tsc --noEmit` clean, `nest build` success on isolated PostgreSQL.

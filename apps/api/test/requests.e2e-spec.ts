@@ -405,4 +405,135 @@ describe('Blood requests (e2e)', () => {
       }
     });
   });
+
+  describe('Phase 5 Step 7 hardening (validation, masking, CSRF)', () => {
+    const missingUuid = '00000000-0000-4000-8000-000000000000';
+
+    it('rejects malformed path identifiers with 400 instead of a driver 500', async () => {
+      const auth = await login(managerA.email);
+      const requestsRes = await request(app.getHttpServer())
+        .get('/api/v1/requests/not-a-uuid')
+        .set('Cookie', auth.cookie);
+      expect(requestsRes.status).toBe(400);
+      expect(requestsRes.body.error.code).toBe('BAD_REQUEST');
+      expect(requestsRes.body.error.requestId).toBeTruthy();
+
+      const issuanceRes = await request(app.getHttpServer())
+        .get('/api/v1/issuances/not-a-uuid')
+        .set('Cookie', auth.cookie);
+      expect(issuanceRes.status).toBe(400);
+      expect(issuanceRes.body.error.code).toBe('BAD_REQUEST');
+
+      const reservationRes = await request(app.getHttpServer())
+        .post('/api/v1/reservations/not-a-uuid/release')
+        .set('Cookie', auth.cookie)
+        .set('x-csrf-token', auth.csrf);
+      expect(reservationRes.status).toBe(400);
+      expect(reservationRes.body.error.code).toBe('BAD_REQUEST');
+    });
+
+    it('returns masked 404s for well-formed but unknown identifiers', async () => {
+      const auth = await login(managerA.email);
+      const requestRes = await request(app.getHttpServer())
+        .get(`/api/v1/requests/${missingUuid}`)
+        .set('Cookie', auth.cookie);
+      expect(requestRes.status).toBe(404);
+      expect(requestRes.body.error.code).toBe('REQUEST_NOT_FOUND');
+
+      const issuanceRes = await request(app.getHttpServer())
+        .get(`/api/v1/issuances/${missingUuid}`)
+        .set('Cookie', auth.cookie);
+      expect(issuanceRes.status).toBe(404);
+      expect(issuanceRes.body.error.code).toBe('ISSUANCE_NOT_FOUND');
+    });
+
+    it('requires authentication and CSRF for issuance commands', async () => {
+      await request(app.getHttpServer())
+        .post(`/api/v1/requests/${missingUuid}/issuances`)
+        .send({ items: [{ reservationItemId: missingUuid }] })
+        .expect(401);
+
+      const auth = await login(managerA.email);
+      const noCsrf = await request(app.getHttpServer())
+        .post(`/api/v1/requests/${missingUuid}/issuances`)
+        .set('Cookie', auth.cookie)
+        .send({ items: [{ reservationItemId: missingUuid }] });
+      expect(noCsrf.status).toBe(403);
+      expect(noCsrf.body.error.code).toBe('CSRF_VIOLATION');
+    });
+
+    it('denies issuance reads and commands without permission', async () => {
+      const auth = await login(outsider.email);
+      const read = await request(app.getHttpServer())
+        .get(`/api/v1/issuances/${missingUuid}`)
+        .set('Cookie', auth.cookie);
+      expect(read.status).toBe(403);
+      expect(read.body.error.code).toBe('FORBIDDEN');
+
+      const command = await request(app.getHttpServer())
+        .post(`/api/v1/requests/${missingUuid}/issuances`)
+        .set('Cookie', auth.cookie)
+        .set('x-csrf-token', auth.csrf)
+        .send({ items: [{ reservationItemId: missingUuid }] });
+      expect(command.status).toBe(403);
+      expect(command.body.error.code).toBe('FORBIDDEN');
+    });
+
+    it('masks cross-facility issuance commands as 404 and enforces request state', async () => {
+      const createdB = await request(app.getHttpServer())
+        .post('/api/v1/requests')
+        .set('Cookie', superAuth.cookie)
+        .set('x-csrf-token', superAuth.csrf)
+        .send({ facilityId: fidB, lines: [{ componentTypeId, quantityRequested: 1 }] })
+        .expect(201);
+      const crossFacility = await request(app.getHttpServer())
+        .post(`/api/v1/requests/${createdB.body.data.id}/issuances`)
+        .set('Cookie', (await login(managerA.email)).cookie)
+        .set('x-csrf-token', (await login(managerA.email)).csrf)
+        .send({ items: [{ reservationItemId: missingUuid }] });
+      expect(crossFacility.status).toBe(404);
+      expect(crossFacility.body.error.code).toBe('REQUEST_NOT_FOUND');
+
+      const createdA = await request(app.getHttpServer())
+        .post('/api/v1/requests')
+        .set('Cookie', (await login(hospitalA.email)).cookie)
+        .set('x-csrf-token', (await login(hospitalA.email)).csrf)
+        .send({ facilityId: fidA, lines: [{ componentTypeId, quantityRequested: 1 }] })
+        .expect(201);
+      const draftIssuance = await request(app.getHttpServer())
+        .post(`/api/v1/requests/${createdA.body.data.id}/issuances`)
+        .set('Cookie', (await login(managerA.email)).cookie)
+        .set('x-csrf-token', (await login(managerA.email)).csrf)
+        .send({ items: [{ reservationItemId: missingUuid }] });
+      expect(draftIssuance.status).toBe(409);
+      expect(draftIssuance.body.error.code).toBe('REQUEST_NOT_ISSUABLE');
+    });
+
+    it('bounds request line arrays and ignores non-whitelisted fields', async () => {
+      const auth = await login(hospitalA.email);
+      const tooMany = await request(app.getHttpServer())
+        .post('/api/v1/requests')
+        .set('Cookie', auth.cookie)
+        .set('x-csrf-token', auth.csrf)
+        .send({
+          facilityId: fidA,
+          lines: Array.from({ length: 51 }, () => ({ componentTypeId, quantityRequested: 1 })),
+        });
+      expect(tooMany.status).toBe(400);
+
+      const massAssignment = await request(app.getHttpServer())
+        .post('/api/v1/requests')
+        .set('Cookie', auth.cookie)
+        .set('x-csrf-token', auth.csrf)
+        .send({
+          facilityId: fidA,
+          status: 'APPROVED',
+          emergencyEscalatedAt: new Date().toISOString(),
+          lines: [{ componentTypeId, quantityRequested: 1 }],
+        })
+        .expect(201);
+      expect(massAssignment.body.data.status).toBe('DRAFT');
+      expect(massAssignment.body.data.emergencyEscalatedAt).toBeNull();
+    });
+  });
 });

@@ -580,6 +580,7 @@ model ReservationItem {
   id            String    @id @default(uuid())
   reservationId String
   unitId        String
+  requestLineId String?
   isActive      Boolean   @default(true)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -587,10 +588,12 @@ model ReservationItem {
 
   reservation   Reservation        @relation(fields: [reservationId], references: [id], onDelete: Cascade)
   unit          BloodComponentUnit @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  requestLine   BloodRequestLine?  @relation(fields: [requestLineId], references: [id], onDelete: Restrict)
   issuanceItems IssuanceItem[]
 
   @@index([reservationId])
   @@index([unitId])
+  @@index([requestLineId])
   @@index([isActive])
 }
 
@@ -735,8 +738,9 @@ model BloodRequestLine {
   createdAt          DateTime    @default(now())
   updatedAt          DateTime    @updatedAt
 
-  request       BloodRequest  @relation(fields: [requestId], references: [id], onDelete: Cascade)
-  componentType ComponentType @relation(fields: [componentTypeId], references: [id], onDelete: Restrict)
+  request          BloodRequest      @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  componentType    ComponentType     @relation(fields: [componentTypeId], references: [id], onDelete: Restrict)
+  reservationItems ReservationItem[]
 
   @@index([requestId])
   @@index([componentTypeId])
@@ -756,6 +760,7 @@ model Issuance {
   destinationReference String?
   notes                String?
   ruleSetVersion       String?
+  idempotencyKey       String?
   metadata             Json?
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
@@ -772,6 +777,7 @@ model Issuance {
   @@index([issuedByUserId])
   @@index([status])
   @@index([createdAt])
+  @@unique([facilityId, idempotencyKey])
 }
 
 model IssuanceItem {
