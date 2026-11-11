@@ -123,6 +123,7 @@ Verified findings (2026-09-21):
 - [x] In-app notification center implemented. (Step 3 backend/API: `GET /api/v1/notifications`, mark-read, read-all, and preferences endpoints scoped to the authenticated user. Operator UI remains Phase 8 — ADR-046.)
 - [x] Real-time events implemented only where justified. (Step 4: SSE `GET /api/v1/notifications/stream` over the existing Nest/Express/RxJS stack with `ready`/`notification.created`/`keepalive`, `Last-Event-ID` replay, and no new infrastructure — ADR-049.)
 - [x] Delivery/retry behavior tested. (Steps 3–6: dedupe/idempotent fan-out, replayed event IDs, delivery accounting; `EMAIL`/`SMS` recorded `SKIPPED / PROVIDER_NOT_CONFIGURED` because no provider is configured. No external delivery claimed.)
+- [x] **Supabase migration deployed** (20261111054529_phase6_transfers_notifications). All 9 migrations applied; database schema up to date. Phase 6 tables, enums, indexes, and FKs verified on Supabase. Partial unique index `TransferItem_unitId_active_unique` preserved. No clinical data inserted.
 
 ## Phase 7 — Analytics + Reporting
 
