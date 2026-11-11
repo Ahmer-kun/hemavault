@@ -1,9 +1,10 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
-import { BloodRequestStatus, RequestUrgency } from '@prisma/client';
+import { HttpStatus, Injectable, Optional } from '@nestjs/common';
+import { BloodRequestStatus, NotificationType, RequestUrgency } from '@prisma/client';
 import { generatePublicCode } from '../../../common/identifiers/public-code';
 import { AppHttpException } from '../../../common/errors/app-http.exception';
 import { AuditService } from '../../../common/audit/audit.service';
 import { ActorContext, canAnywhere, canAtFacility } from '../../rbac/domain/policy';
+import { NotificationService } from '../../notifications/application/notification.service';
 import { REQUEST_ACTIONS, REQUEST_PUBLIC_CODE_PREFIX } from '../domain/request.constants';
 import {
   invalidRequestTransitionError,
@@ -83,6 +84,7 @@ export class RequestService {
   constructor(
     private readonly repository: RequestRepository,
     private readonly auditService: AuditService,
+    @Optional() private readonly notifications?: NotificationService,
   ) {}
 
   private view(request: RequestWithDetails): RequestView {
@@ -253,6 +255,27 @@ export class RequestService {
     });
     const view = this.view(created);
     await this.recordEmergencyEscalation(actor, view, req, escalation, null);
+    if (view.emergencyEscalatedAt) {
+      await this.notifications?.notifySafely({
+        actorUserId: actor.userId,
+        type: NotificationType.EMERGENCY_REQUEST,
+        title: `Emergency request ${view.publicCode} requires review`,
+        body: `An emergency request was raised at ${view.facility.name}.`,
+        facilityId: view.facility.id,
+        resourceType: 'BloodRequest',
+        resourceId: view.id,
+        dedupeKey: `request:${view.id}:emergency`,
+        metadata: {
+          urgency: view.urgency,
+          requiredByAt: view.requiredByAt?.toISOString() ?? null,
+        },
+        facilityRecipients: [
+          { facilityId: view.facility.id, permissions: ['request.approve', 'request.review'] },
+        ],
+        excludeUserIds: [actor.userId],
+        auditContext: req,
+      });
+    }
     return view;
   }
 
@@ -336,6 +359,24 @@ export class RequestService {
       escalation,
       dto.urgency !== undefined ? request.urgency : null,
     );
+    if (escalation.escalated) {
+      await this.notifications?.notifySafely({
+        actorUserId: actor.userId,
+        type: NotificationType.EMERGENCY_REQUEST,
+        title: `Emergency request ${view.publicCode} requires review`,
+        body: `An existing request at ${view.facility.name} was escalated to emergency.`,
+        facilityId: view.facility.id,
+        resourceType: 'BloodRequest',
+        resourceId: view.id,
+        dedupeKey: `request:${view.id}:emergency:${view.emergencyEscalatedAt?.getTime() ?? 'escalated'}`,
+        metadata: { urgency: view.urgency },
+        facilityRecipients: [
+          { facilityId: view.facility.id, permissions: ['request.approve', 'request.review'] },
+        ],
+        excludeUserIds: [actor.userId],
+        auditContext: req,
+      });
+    }
     return view;
   }
 
@@ -387,6 +428,22 @@ export class RequestService {
       userAgent: req.userAgent,
       metadata: { status: view.status },
     });
+    await this.notifications?.notifySafely({
+      actorUserId: actor.userId,
+      type: NotificationType.REQUEST_SUBMITTED,
+      title: `Request ${view.publicCode} submitted`,
+      body: `A ${view.urgency.toLowerCase()} request was submitted at ${view.facility.name}.`,
+      facilityId: view.facility.id,
+      resourceType: 'BloodRequest',
+      resourceId: view.id,
+      dedupeKey: `request:${view.id}:submitted`,
+      metadata: { urgency: view.urgency },
+      facilityRecipients: [
+        { facilityId: view.facility.id, permissions: ['request.approve', 'request.review'] },
+      ],
+      excludeUserIds: [actor.userId],
+      auditContext: req,
+    });
     return view;
   }
 
@@ -417,6 +474,20 @@ export class RequestService {
       ipAddress: req.ipAddress,
       userAgent: req.userAgent,
       metadata: { status: view.status },
+    });
+    await this.notifications?.notifySafely({
+      actorUserId: actor.userId,
+      type: NotificationType.REQUEST_APPROVED,
+      title: `Request ${view.publicCode} approved`,
+      body: `Your request at ${view.facility.name} was approved.`,
+      facilityId: view.facility.id,
+      resourceType: 'BloodRequest',
+      resourceId: view.id,
+      dedupeKey: `request:${view.id}:approved`,
+      metadata: { urgency: view.urgency },
+      explicitUserIds: [request.requestedByUserId],
+      excludeUserIds: [actor.userId],
+      auditContext: req,
     });
     return view;
   }
@@ -449,6 +520,20 @@ export class RequestService {
       ipAddress: req.ipAddress,
       userAgent: req.userAgent,
       metadata: { status: view.status },
+    });
+    await this.notifications?.notifySafely({
+      actorUserId: actor.userId,
+      type: NotificationType.REQUEST_REJECTED,
+      title: `Request ${view.publicCode} rejected`,
+      body: `Your request at ${view.facility.name} was rejected.`,
+      facilityId: view.facility.id,
+      resourceType: 'BloodRequest',
+      resourceId: view.id,
+      dedupeKey: `request:${view.id}:rejected`,
+      metadata: { reasonProvided: true },
+      explicitUserIds: [request.requestedByUserId],
+      excludeUserIds: [actor.userId],
+      auditContext: req,
     });
     return view;
   }

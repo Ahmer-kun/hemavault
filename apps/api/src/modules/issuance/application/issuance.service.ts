@@ -1,8 +1,9 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Optional } from '@nestjs/common';
 import {
   BloodRequestStatus,
   InventoryMovementType,
   IssuanceStatus,
+  NotificationType,
   Prisma,
   RequestUrgency,
   ReservationStatus,
@@ -15,6 +16,7 @@ import { generatePublicCode } from '../../../common/identifiers/public-code';
 import { ActorContext, canAtFacility, canGlobally } from '../../rbac/domain/policy';
 import { ExpiryService } from '../../inventory/application/expiry.service';
 import { InventoryMovementService } from '../../inventory/application/inventory-movement.service';
+import { NotificationService } from '../../notifications/application/notification.service';
 import {
   canCancelIssuance,
   canConfirmIssuance,
@@ -36,7 +38,16 @@ export interface CreateIssuanceInput {
 const ISSUANCE_PUBLIC_CODE_PREFIX = 'ISS';
 
 const ISSUANCE_INCLUDE = {
-  request: { select: { id: true, publicCode: true, status: true, urgency: true, facilityId: true } },
+  request: {
+    select: {
+      id: true,
+      publicCode: true,
+      status: true,
+      urgency: true,
+      facilityId: true,
+      requestedByUserId: true,
+    },
+  },
   reservation: { select: { id: true, status: true, ruleSetVersion: true } },
   facility: { select: { id: true, name: true, code: true } },
   items: {
@@ -140,6 +151,7 @@ export class IssuanceService {
     private readonly expiryService: ExpiryService,
     private readonly movementService: InventoryMovementService,
     private readonly audit: AuditService,
+    @Optional() private readonly notifications?: NotificationService,
   ) {}
 
   private canIssue(actor: ActorContext, facilityId: string): boolean {
@@ -422,6 +434,26 @@ export class IssuanceService {
       },
     });
 
+    await this.notifications?.notifySafely({
+      actorUserId: actor.userId,
+      type: NotificationType.ISSUANCE_CREATED,
+      title: `Issuance ${issuance.publicCode} created`,
+      body: `${issuance.items.length} unit(s) prepared for issuance and awaiting confirmation.`,
+      facilityId: issuance.facilityId,
+      resourceType: 'Issuance',
+      resourceId: issuance.id,
+      dedupeKey: `issuance:${issuance.id}:created`,
+      metadata: {
+        domainRequestId: request.id,
+        unitCount: issuance.items.length,
+      },
+      facilityRecipients: [
+        { facilityId: issuance.facilityId, permissions: ['request.fulfill'] },
+      ],
+      excludeUserIds: [actor.userId],
+      auditContext: ctx,
+    });
+
     return { issuance, idempotent: false };
   }
 
@@ -665,6 +697,43 @@ export class IssuanceService {
           ruleSetVersion: issuance.ruleSetVersion,
         },
       });
+
+      await this.notifications?.notifySafely({
+        actorUserId: actor.userId,
+        type: NotificationType.ISSUANCE_CONFIRMED,
+        title: `Issuance ${issuance.publicCode} confirmed`,
+        body: `${result.unitIds.length} unit(s) issued and recorded as used.`,
+        facilityId: issuance.facilityId,
+        resourceType: 'Issuance',
+        resourceId: issuance.id,
+        dedupeKey: `issuance:${issuance.id}:confirmed`,
+        metadata: {
+          domainRequestId: result.requestId,
+          unitCount: result.unitIds.length,
+        },
+        facilityRecipients: [
+          { facilityId: issuance.facilityId, permissions: ['request.fulfill', 'request.read'] },
+        ],
+        excludeUserIds: [actor.userId],
+        auditContext: ctx,
+      });
+
+      if (result.requestStatus === BloodRequestStatus.FULFILLED && issuance.request) {
+        await this.notifications?.notifySafely({
+          actorUserId: actor.userId,
+          type: NotificationType.REQUEST_FULFILLED,
+          title: `Request ${issuance.request.publicCode} fulfilled`,
+          body: `All requested units have been issued at ${issuance.facility.name}.`,
+          facilityId: issuance.facilityId,
+          resourceType: 'BloodRequest',
+          resourceId: issuance.request.id,
+          dedupeKey: `request:${issuance.request.id}:fulfilled`,
+          metadata: { issuanceId: issuance.id, unitCount: result.unitIds.length },
+          explicitUserIds: [issuance.request.requestedByUserId],
+          excludeUserIds: [actor.userId],
+          auditContext: ctx,
+        });
+      }
     }
 
     return { issuance, idempotent: result.idempotent };

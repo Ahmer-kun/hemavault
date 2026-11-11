@@ -1,8 +1,9 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   BloodRequestStatus,
   InventoryMovementType,
+  NotificationType,
   Prisma,
   ReservationStatus,
   UnitState,
@@ -17,6 +18,7 @@ import { evaluateCompatibility } from '../../matching/domain/compatibility-evalu
 import { selectActiveRuleSet } from '../../matching/domain/rule-set-policy';
 import { CompatibilityRuleSetRepository } from '../../matching/infrastructure/compatibility-rule-set.repository';
 import { ExpiryService } from './expiry.service';
+import { NotificationService } from '../../notifications/application/notification.service';
 
 interface RequestContextMeta {
   requestId: string;
@@ -60,6 +62,7 @@ export class RequestReservationService {
     private readonly ruleSetRepository: CompatibilityRuleSetRepository,
     private readonly config: ConfigService,
     private readonly audit: AuditService,
+    @Optional() private readonly notifications?: NotificationService,
   ) {}
 
   private async resolveRuleSetOrThrow() {
@@ -383,6 +386,25 @@ export class RequestReservationService {
           ruleSetVersion: result.reservation.ruleSetVersion,
           idempotencyKey: input.idempotencyKey ?? null,
         },
+      });
+      await this.notifications?.notifySafely({
+        actorUserId: actor.userId,
+        type: NotificationType.REQUEST_RESERVED,
+        title: `Request ${request.publicCode} has reserved units`,
+        body: `${result.reservation.items.length} unit(s) reserved at ${result.reservation.facility.name}.`,
+        facilityId: request.facilityId,
+        resourceType: 'Reservation',
+        resourceId: result.reservation.id,
+        dedupeKey: `reservation:${result.reservation.id}:created`,
+        metadata: {
+          domainRequestId: request.id,
+          unitCount: result.reservation.items.length,
+        },
+        facilityRecipients: [
+          { facilityId: request.facilityId, permissions: ['request.fulfill', 'inventory.issue'] },
+        ],
+        excludeUserIds: [actor.userId],
+        auditContext: ctx,
       });
     }
     return result;

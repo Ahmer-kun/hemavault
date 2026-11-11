@@ -12,9 +12,10 @@ import { DonationIntegrationService } from './application/donation-integration.s
 import { InventoryController } from './presentation/inventory.controller';
 import { ReservationsController } from './presentation/reservations.controller';
 import { CompatibilityRuleSetRepository } from '../matching/infrastructure/compatibility-rule-set.repository';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
-  imports: [AuditModule],
+  imports: [AuditModule, NotificationsModule],
   controllers: [InventoryController, ReservationsController],
   providers: [
     InventoryMovementService,
