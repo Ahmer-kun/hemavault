@@ -609,3 +609,61 @@ Every workflow with consequential transitions has explicit allowed transitions a
 **Consequences:** Phase 5 stays bounded and honest about scope; Phase 8 owns the operator experience with the required auth/CSRF/routing foundations already available from the backend.
 
 **Verification:** `apps/web` inventory review (files listed above); `npm run build -w @blood-ops/web` succeeds for the existing shell; API `npm test` 35 files / 341 tests, `tsc --noEmit` clean, `nest build` success on isolated PostgreSQL.
+
+## ADR-047 — Transfers are limited to active facilities within one organization
+
+**Status:** Accepted (Phase 6 Step 2 implementation)
+
+**Context:** The platform models organizations containing facilities. Transferring blood units between unrelated organizations would require cross-tenant data sharing, consent, and legal agreements that are outside this phase and the current threat model. Unit ownership and facility isolation are enforced throughout inventory, requests, and issuance.
+
+**Decision:**
+- A transfer source and destination must be two different facilities with `status = ACTIVE` that belong to the same organization. Same-facility and cross-organization requests are rejected with explicit `400` errors (`TRANSFER_SAME_FACILITY`, `TRANSFER_ORGANIZATION_MISMATCH`).
+- Authorization remains facility-scoped: creating/approving/packing/dispatching/cancelling requires the relevant `transfer.*` permission at the source; receipt requires `transfer.receive` at the destination.
+- Cross-organization transfers are not implemented as a hidden bypass; supporting them later requires a separate, explicitly authorized inter-tenant workflow.
+
+**Alternatives considered:** Allowing any active facility regardless of organization (leaks inventory and audit data across tenants); global-only transfer permissions (breaks the least-privilege facility model).
+
+**Consequences:** Transfers preserve tenant isolation and the existing RBAC model. Organizations that need inter-organization sharing must use a future, separately designed workflow with its own legal/security review.
+
+**Verification:** `apps/api/test/transfers.e2e-spec.ts` covers same-facility, cross-organization, inactive/missing facility, and out-of-scope actor cases against isolated PostgreSQL.
+
+## ADR-048 — Transfer units are claimed at request time and released before dispatch
+
+**Status:** Accepted (Phase 6 Step 2 implementation)
+
+**Context:** Blood units are discrete, auditable inventory. A transfer can take hours or days between request and dispatch. Without a claim, the same unit could be reserved, issued, or promised to another transfer while a transfer is pending. Conversely, a claim must not become a hidden permanent removal if the transfer is rejected or cancelled.
+
+**Decision:**
+- Creating a transfer atomically moves each selected unit `AVAILABLE → TRANSFER_PENDING`, creates one active `TransferItem`, and writes a `STATE_CHANGE` movement. A partial unique index on `TransferItem(unitId) WHERE isActive = true` (plus deterministic `FOR UPDATE` locking and claim checks) makes double claims impossible.
+- `REQUESTED/APPROVED/PACKED → CANCELLED` and `REQUESTED → REJECTED` return units `TRANSFER_PENDING → AVAILABLE`, deactivate the claim, and write movements/audit. Cancellation after dispatch is rejected; there is no silent reversal of dispatched units.
+- Dispatch is a single command that advances `PACKED → DISPATCHED → IN_TRANSIT` atomically because the contract exposes no separate in-transit command. It revalidates state, facility, and expiry so a unit that expired while held is never dispatched.
+- Receipt requires `transfer.receive` at the destination, moves the unit's facility to the destination, records an `IN_TRANSIT → RECEIVED` movement plus a `RECEIVED` movement type, deactivates the claim, and audits the receipt. Received units stay `RECEIVED` rather than being silently returned to `AVAILABLE`.
+- An in-transit exception/return workflow (lost, damaged, refused, or misrouted units) is out of scope for this phase. Conservation is preserved because dispatch and receipt remain the only forward paths and no post-dispatch unit is silently resurrected.
+
+**Alternatives considered:** Reserving at dispatch only (allows double-promising and stale stock); leaving units `AVAILABLE` while pending (same risk); allowing post-dispatch cancellation back to `AVAILABLE` (would silently reverse an audited physical shipment).
+
+**Consequences:** Pending transfers hold real inventory, and abandoned transfers return stock through explicit, audited cancellation/rejection. Operators cannot accidentally use claimed units for issuance or another transfer. Post-dispatch discrepancies require a future documented exception workflow.
+
+**Verification:** `apps/api/test/transfers.e2e-spec.ts` verifies the full lifecycle, claims under concurrency, rollback, cancellation/rejection return, post-dispatch guards, expiry at dispatch, idempotency, movements, audit, and cross-facility scope on isolated PostgreSQL; `transfer-state-machine.spec.ts` and `unit-state-machine.spec.ts` cover the pure rules.
+
+## ADR-049 — Durable notifications with in-process SSE and polling fallback
+
+**Status:** Accepted (Phase 6 Steps 3–4 implementation)
+
+**Context:** Operational events must reach staff reliably without adding Redis, queues, a paid provider, or a second service. The modular monolith must remain correct when real-time delivery is unavailable, and safety alerts must not be silently muted.
+
+**Decision:**
+- Notifications are durable rows (`Notification`) plus per-channel delivery accounting (`NotificationDelivery`) and per-user/type/channel preferences. `(userId, dedupeKey)` makes fan-out idempotent and retry-safe.
+- Recipients are resolved from explicit users plus active facility members whose role grants the relevant permission. Only active users receive notifications.
+- `EMERGENCY_REQUEST` is `CRITICAL` and bypasses user preferences. Lower priorities honour `IN_APP` suppression. External `EMAIL`/`SMS` rows are recorded as `SKIPPED / PROVIDER_NOT_CONFIGURED`; no external delivery is claimed until a real provider is configured and verified.
+- Real-time delivery uses Server-Sent Events at `GET /api/v1/notifications/stream` over the existing Nest/Express/RxJS stack and an in-process `Subject` bus filtered by user ID. There is no new infrastructure.
+- The stream sends `ready`, then `notification.created` events, plus periodic `keepalive`. Event IDs encode `createdAt` time and notification ID; `Last-Event-ID` replays up to 100 later notifications for that user. The stream is read-only and best-effort, so duplicates/omissions are harmless.
+- `GET /api/v1/notifications` polling remains the authoritative fallback and is fully functional without an open stream. Multi-instance fan-out is out of scope for the monolith.
+- Notification publication writes an audit event with `targetType: 'Notification'` and the triggering resource identity in metadata. This avoids polluting the audit chain of the transfer/request/issuance being notified about while keeping notification creation traceable.
+- Request cancellation currently emits no notification because `NotificationType` has no `REQUEST_CANCELLED` value; adding an enum migration solely for this was considered disproportionate. This is a documented limitation, not a delivery claim.
+
+**Alternatives considered:** Redis pub/sub or a queue (new infrastructure without a current requirement); WebSockets (more state/connection management than needed for read-only events); provider integrations without credentials/verification (would fake delivery); swallowing notification errors after commit (hides operational failures).
+
+**Consequences:** Notifications are correct and auditable even when no client is connected. Real-time improves responsiveness but never becomes a correctness dependency. Fan-out after a committed transaction is best-effort with structured logging and idempotent retry.
+
+**Verification:** unit tests for priority/preference policy and event IDs; `apps/api/test/notifications.e2e-spec.ts` covers persistence, dedupe, pagination, user isolation, read/read-all, preference suppression, critical bypass, delivery accounting, replay, SSE ready event, authentication, authorization, CSRF, and validation on isolated PostgreSQL.

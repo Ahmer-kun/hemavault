@@ -250,19 +250,85 @@ POST   /api/v1/transfers
 GET    /api/v1/transfers
 GET    /api/v1/transfers/:transferId
 POST   /api/v1/transfers/:transferId/approve
+POST   /api/v1/transfers/:transferId/reject
 POST   /api/v1/transfers/:transferId/pack
 POST   /api/v1/transfers/:transferId/dispatch
 POST   /api/v1/transfers/:transferId/receive
 POST   /api/v1/transfers/:transferId/cancel
 ```
 
+**Lifecycle:** `REQUESTED → APPROVED → PACKED → DISPATCHED → IN_TRANSIT → RECEIVED`, with
+`REQUESTED → REJECTED|CANCELLED` and `APPROVED|PACKED → CANCELLED`. `RECEIVED`, `REJECTED`, and
+`CANCELLED` are terminal. Dispatch advances `DISPATCHED → IN_TRANSIT` atomically in one command.
+
+**Create body:** `sourceFacilityId`, `destinationFacilityId` (UUIDs; different active facilities in the same
+organization — ADR-047), `unitIds` (1–50 unique UUIDs), optional `notes` (≤1000 chars), optional
+`idempotencyKey` (≤200 chars, unique per source facility). Creation claims every unit with
+`AVAILABLE → TRANSFER_PENDING` in one transaction; concurrent double claims are impossible. The optional
+key returns the original transfer on retry and rejects materially different reuse with
+`IDEMPOTENCY_KEY_CONFLICT`.
+
+**List query:** optional `status`, `limit` (1–100, default 20), `offset` (≥0). Only transfers where the actor
+has `transfer.read` at the source or destination facility (or globally) are visible.
+
+**Command bodies:** `reject` requires `reason` (3–1000 chars); `cancel` accepts an optional `reason` (3–1000
+chars). Other commands take no body.
+
+**Authorization:** `transfer.create|approve|pack|dispatch|cancel` at the source facility; `transfer.receive` at
+the destination facility; `transfer.read` at either facility; global permissions apply. All mutations require
+CSRF. Out-of-scope transfer IDs are masked as `404 TRANSFER_NOT_FOUND`; malformed UUIDs return `400`.
+
+**Inventory behavior:** a unit is eligible only when it belongs to the source facility, is `AVAILABLE` and not
+effectively expired, and has no active reservation or transfer claim. Recalled, discarded, expired,
+quarantined, issued, reserved, transfer-pending, in-transit, and received units are rejected. Dispatch
+re-checks expiry so a unit that expires while held is never dispatched. Cancellation/rejection returns units to
+`AVAILABLE`; receipt reassigns units to the destination facility and marks them `RECEIVED`. Every transition
+writes an immutable inventory movement and an audit event (`transfer.*`).
+
+**Transfer errors (explicit):** `TRANSFER_NOT_FOUND`, `TRANSFER_FACILITY_NOT_FOUND`, `TRANSFER_SAME_FACILITY`,
+`TRANSFER_ORGANIZATION_MISMATCH`, `TRANSFER_ITEMS_REQUIRED`, `TRANSFER_TOO_MANY_ITEMS`,
+`DUPLICATE_TRANSFER_ITEM`, `TRANSFER_UNIT_INELIGIBLE` (`reason` such as `STATE_NOT_AVAILABLE`,
+`UNIT_NOT_AT_SOURCE_FACILITY`, `UNIT_EXPIRED`, `ACTIVE_RESERVATION_CLAIM`, `ACTIVE_TRANSFER_CLAIM`,
+`UNIT_NOT_TRANSFER_PENDING`, `UNIT_NOT_IN_TRANSIT`), `TRANSFER_NOT_APPROVABLE`, `TRANSFER_NOT_PACKABLE`,
+`TRANSFER_NOT_DISPATCHABLE`, `TRANSFER_NOT_RECEIVABLE`, `TRANSFER_NOT_REJECTABLE`,
+`TRANSFER_NOT_CANCELLABLE`, `TRANSFER_REASON_REQUIRED`, `TRANSFER_TERMINAL_STATE`,
+`TRANSFER_INVALID_TRANSITION`, `IDEMPOTENCY_KEY_CONFLICT`.
+
 ## Notifications
 
 ```text
 GET    /api/v1/notifications
+GET    /api/v1/notifications/preferences
+POST   /api/v1/notifications/preferences
 POST   /api/v1/notifications/:notificationId/read
 POST   /api/v1/notifications/read-all
+GET    /api/v1/notifications/stream        (Server-Sent Events)
 ```
+
+**Authorization:** authenticated session + `notification.read`. Every endpoint is scoped to the authenticated
+user: a user can never list, read, or mark another user's notifications, and another user's ID is masked as
+`404 NOTIFICATION_NOT_FOUND`. Mutations require CSRF.
+
+**List query:** optional `unreadOnly` (boolean), `type` (`NotificationType`), `limit` (1–100, default 20), and
+`offset` (≥0). The response includes `items`, `total`, `limit`, `offset`, and `unreadCount`.
+
+**Read behavior:** mark-read and mark-all-read are idempotent. Marking an already-read notification keeps the
+original `readAt`.
+
+**Preferences:** `POST /preferences` accepts `preferences[]` of `{ type, channel, enabled }` (1–100 entries)
+and upserts per user/type/channel. `CRITICAL` notifications (emergency alerts) ignore preferences by design;
+lower priorities honour `IN_APP` suppression.
+
+**Delivery accounting:** each notification has one row per channel. `IN_APP` is `DELIVERED`; `EMAIL` and `SMS`
+are recorded as `SKIPPED / PROVIDER_NOT_CONFIGURED` because no external provider is configured. The API never
+claims external delivery.
+
+**Real-time stream:** `GET /api/v1/notifications/stream` emits an initial `ready` event, `notification.created`
+events for the authenticated user only, and `keepalive` events every 25 seconds. Event IDs encode the creation
+timestamp; sending `Last-Event-ID` triggers a bounded replay (up to 100) of that user's later notifications.
+The stream is best-effort and single-instance; `GET /api/v1/notifications` polling remains authoritative.
+
+**Notification errors (explicit):** `NOTIFICATION_NOT_FOUND`, `FORBIDDEN`, `CSRF_VIOLATION`, `VALIDATION_ERROR`.
 
 ## Audit and reports
 

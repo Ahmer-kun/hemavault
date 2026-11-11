@@ -114,15 +114,15 @@ Verified findings (2026-09-21):
 
 ## Phase 6 — Transfers + Notifications + Real-Time
 
-- [ ] Facility transfer request implemented.
-- [ ] Transfer packing/dispatch implemented.
-- [ ] In-transit state implemented.
-- [ ] Receipt confirmation implemented.
-- [ ] Transfer inventory reconciliation implemented.
-- [ ] Notification model/service implemented.
-- [ ] In-app notification center implemented.
-- [ ] Real-time events implemented only where justified.
-- [ ] Delivery/retry behavior tested.
+- [x] Facility transfer request implemented. (Step 2: `POST /api/v1/transfers` claims `AVAILABLE → TRANSFER_PENDING` under `FOR UPDATE` locks with a partial unique active-claim index; different active same-organization facilities only — ADR-047/048.)
+- [x] Transfer packing/dispatch implemented. (Step 2: `approve`, `reject`, `pack`, `dispatch`, `cancel` commands with pure state-machine validation, immutable movements, audit events, and facility-scoped authorization.)
+- [x] In-transit state implemented. (Step 2: `dispatch` atomically advances `PACKED → DISPATCHED → IN_TRANSIT`, moves units `TRANSFER_PENDING → IN_TRANSIT`, re-checks expiry, and records dispatch metadata.)
+- [x] Receipt confirmation implemented. (Step 2: `POST /:transferId/receive` requires `transfer.receive` at the destination, reassigns units to the destination facility, and records `IN_TRANSIT → RECEIVED`; received units stay `RECEIVED`.)
+- [x] Transfer inventory reconciliation implemented. (Step 2: every transition writes immutable `InventoryMovement` rows and transfer unit claims are deactivated on receipt/cancel/reject, so conservation is auditable; correction remains possible through the existing `inventory.reconcile` endpoint. No dedicated transfer reconciliation report — Phase 7.)
+- [x] Notification model/service implemented. (Step 3: `Notification`, `NotificationDelivery`, `NotificationPreference` plus `NotificationService` with recipient resolution, `(userId, dedupeKey)` idempotency, preferences, bounded pagination, and audit.)
+- [x] In-app notification center implemented. (Step 3 backend/API: `GET /api/v1/notifications`, mark-read, read-all, and preferences endpoints scoped to the authenticated user. Operator UI remains Phase 8 — ADR-046.)
+- [x] Real-time events implemented only where justified. (Step 4: SSE `GET /api/v1/notifications/stream` over the existing Nest/Express/RxJS stack with `ready`/`notification.created`/`keepalive`, `Last-Event-ID` replay, and no new infrastructure — ADR-049.)
+- [x] Delivery/retry behavior tested. (Steps 3–6: dedupe/idempotent fan-out, replayed event IDs, delivery accounting; `EMAIL`/`SMS` recorded `SKIPPED / PROVIDER_NOT_CONFIGURED` because no provider is configured. No external delivery claimed.)
 
 ## Phase 7 — Analytics + Reporting
 
@@ -629,6 +629,25 @@ Finding: apps/web is a health-only shell — App.tsx, features/system/SystemStat
 Acceptance evidence: backend/API is authoritative for Phase 5 — server-side RBAC, validation, structured errors, audit, immutable movements, and automated tests on isolated PostgreSQL. docs/API_CONTRACT.md documents the stable contract for Phase 8.
 Verification: apps/web file inventory; npm run build -w @blood-ops/web success for existing shell; API gates (unit 198/198, e2e 143/143, full npm test 341/341, tsc clean, nest build success) on isolated PostgreSQL.
 Remaining blockers/limitations: approved clinical compatibility dataset (production matching disabled, ADR-018/040/042); notification/alert delivery (Phase 6); per-route rate limiting (Phase 9); operator UI (Phase 8).
+```
+
+### Phase 6 — Transfers, notifications, real-time (2026-11-11)
+
+```text
+Date: 2026-11-11
+Phase: Phase 6 (Steps 1–9)
+Scope implemented (backend/API): apps/api/prisma/schema.prisma (Transfer, TransferItem, Notification, NotificationDelivery, NotificationPreference + enums/relations); forward-only migration 20261111054529_phase6_transfers_notifications; apps/api/src/modules/transfers/** (state machine + spec, constants, structured errors, TransferService, DTOs, controller, module); apps/api/src/modules/notifications/** (policy, types, delivery abstraction, NotificationService, NotificationEventsService, NotificationDeliveryService, DTOs, controller incl. SSE, module); fan-out integration in RequestService, IssuanceService (incl. REQUEST_FULFILLED), RequestReservationService, TransferService; module wiring (app/requests/issuance/inventory); unit state machine TRANSFER_PENDING → AVAILABLE return path + regression spec; docs/API_CONTRACT.md transfer/notification contract; ADR-047/048/049; docs/PHASE_6_PLAN.md.
+Endpoints: POST/GET /api/v1/transfers; GET /api/v1/transfers/:transferId; POST /api/v1/transfers/:transferId/{approve,reject,pack,dispatch,receive,cancel}; GET /api/v1/notifications, /preferences; POST /api/v1/notifications/{:notificationId/read,read-all,preferences}; GET /api/v1/notifications/stream (SSE).
+
+Migration: forward-only 20261111054529_phase6_transfers_notifications — additive enums/tables/relations, partial unique index TransferItem(unitId) WHERE isActive = true, InventoryMovement.transferId FK ON DELETE SET NULL. Historical migrations untouched; no reset/db push/destructive SQL; applied only to the isolated local PostgreSQL (localhost:5433).
+
+Transfers safety: source/destination must be different ACTIVE facilities in one organization (ADR-047); creation claims units in one transaction with deterministic FOR UPDATE locking, active-reservation/active-transfer claim checks, expiry classification, and facility-scoped idempotency; lifecycle REQUESTED → APPROVED → PACKED → DISPATCHED → IN_TRANSIT → RECEIVED plus REQUESTED → REJECTED/CANCELLED and APPROVED/PACKED → CANCELLED (ADR-048); dispatch re-checks expiry; cancel/reject return units to AVAILABLE; post-dispatch cancellation and terminal-state transitions rejected; every transition writes an immutable movement and audit event; out-of-scope IDs masked 404; mutations require CSRF.
+
+Notifications/real-time safety: durable rows are authoritative; (userId, dedupeKey) makes fan-out idempotent; recipients are explicit users plus active facility members holding the required permission; CRITICAL/EMERGENCY bypass preferences (ADR-049); IN_APP delivery is DELIVERED while EMAIL/SMS are SKIPPED / PROVIDER_NOT_CONFIGURED (no external delivery claimed); SSE is read-only, single-instance, user-filtered, with bounded Last-Event-ID replay; GET /notifications polling remains the fallback.
+
+Tests (isolated PostgreSQL localhost:5433): unit 209/209 across 28 files (includes transfer state machine, notification priority/preference/event-ID, unit-state return path); e2e 12 files / 168 tests, 0 failed (transfers 10/10; notifications 15/15 incl. SSE/authz/CSRF/isolation/dedupe/preferences/delivery accounting; Phase 0–5 regression green); full npm test 377/377. Gates: prisma validate clean; tsc --noEmit clean; nest build success; web build success.
+Lint/format: new Phase 6 files pass targeted eslint and Prettier. Full-repo lint/format still fails on pre-existing baseline issues (no-explicit-any in older request/reservation/e2e files; pre-existing Prettier drift in Phase 0–5 files) — unchanged by Phase 6.
+Known limitations: Supabase Phase 6 migration NOT deployed (requires explicit authorization; Supabase currently has the 8 Phase 5 migrations); request cancellation has no NotificationType and therefore emits no notification; in-transit exception/return workflow, multi-instance fan-out, and operator UI are deferred (ADR-048/049/046).
 ```
 
 ### Review 0 entry
