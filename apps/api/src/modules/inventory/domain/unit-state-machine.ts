@@ -11,6 +11,8 @@ const TERMINAL_STATES = new Set<UnitState>([
 ]);
 
 const ALLOWED_TRANSITIONS: Record<UnitState, Set<UnitState>> = {
+  // TRANSFER_PENDING → AVAILABLE is the explicit transfer cancellation/rejection
+  // return path (ADR-048). Units never leave the source facility until dispatch.
   [UnitState.COLLECTED]: new Set([UnitState.QUARANTINED]),
   [UnitState.QUARANTINED]: new Set([UnitState.AVAILABLE, UnitState.DISCARDED, UnitState.RECALLED]),
   [UnitState.AVAILABLE]: new Set([
@@ -29,7 +31,7 @@ const ALLOWED_TRANSITIONS: Record<UnitState, Set<UnitState>> = {
     UnitState.DISCARDED,
     UnitState.RECALLED,
   ]),
-  [UnitState.TRANSFER_PENDING]: new Set([UnitState.IN_TRANSIT]),
+  [UnitState.TRANSFER_PENDING]: new Set([UnitState.IN_TRANSIT, UnitState.AVAILABLE]),
   [UnitState.IN_TRANSIT]: new Set([UnitState.RECEIVED]),
   [UnitState.RECEIVED]: new Set([UnitState.RECEIVED_BY_DESTINATION]),
   [UnitState.RECEIVED_BY_DESTINATION]: new Set([UnitState.CLOSED]),

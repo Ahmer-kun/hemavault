@@ -113,6 +113,15 @@ model User {
   reservationsCreated     Reservation[]          @relation("ReservationCreatedBy")
   bloodRequestsCreated    BloodRequest[]         @relation("BloodRequestCreatedBy")
   issuancesCreated        Issuance[]             @relation("IssuanceCreatedBy")
+
+  transfersRequested      Transfer[]               @relation("TransferRequestedBy")
+  transfersApproved       Transfer[]               @relation("TransferApprovedBy")
+  transfersDispatched     Transfer[]               @relation("TransferDispatchedBy")
+  transfersReceived       Transfer[]               @relation("TransferReceivedBy")
+  transfersCancelled      Transfer[]               @relation("TransferCancelledBy")
+  transfersRejected       Transfer[]               @relation("TransferRejectedBy")
+  notifications           Notification[]
+  notificationPreferences NotificationPreference[]
 }
 
 model Session {
@@ -285,6 +294,9 @@ model Facility {
   inventoryMovements InventoryMovement[]
   bloodRequests      BloodRequest[]
   issuances          Issuance[]
+  transfersFrom      Transfer[]           @relation("TransferSourceFacility")
+  transfersTo        Transfer[]           @relation("TransferDestinationFacility")
+  notifications      Notification[]
 
   @@index([organizationId])
   @@index([status])
@@ -506,6 +518,7 @@ model BloodComponentUnit {
   movements        InventoryMovement[]
   reservationItems ReservationItem[]
   issuanceItems    IssuanceItem[]
+  transferItems    TransferItem[]
 
   @@index([donationId])
   @@index([componentTypeId])
@@ -538,12 +551,14 @@ model InventoryMovement {
   unit      BloodComponentUnit @relation(fields: [unitId], references: [id], onDelete: Restrict)
   facility  Facility?          @relation(fields: [facilityId], references: [id], onDelete: SetNull)
   actorUser User?              @relation("InventoryMovementActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  transfer  Transfer?          @relation(fields: [transferId], references: [id], onDelete: SetNull)
 
   @@index([unitId])
   @@index([facilityId])
   @@index([actorUserId])
   @@index([movementType])
   @@index([occurredAt])
+  @@index([transferId])
 }
 
 model Reservation {
@@ -771,13 +786,13 @@ model Issuance {
   issuedBy    User?          @relation("IssuanceCreatedBy", fields: [issuedByUserId], references: [id], onDelete: SetNull)
   items       IssuanceItem[]
 
+  @@unique([facilityId, idempotencyKey])
   @@index([requestId])
   @@index([reservationId])
   @@index([facilityId])
   @@index([issuedByUserId])
   @@index([status])
   @@index([createdAt])
-  @@unique([facilityId, idempotencyKey])
 }
 
 model IssuanceItem {
@@ -841,4 +856,178 @@ model CompatibilityRule {
   @@index([componentTypeId])
   @@index([recipientBloodGroup])
   @@index([donorBloodGroup])
+}
+
+enum TransferStatus {
+  REQUESTED
+  APPROVED
+  PACKED
+  DISPATCHED
+  IN_TRANSIT
+  RECEIVED
+  REJECTED
+  CANCELLED
+}
+
+model Transfer {
+  id                    String         @id @default(uuid())
+  publicCode            String         @unique
+  sourceFacilityId      String
+  destinationFacilityId String
+  requestedByUserId     String?
+  approvedByUserId      String?
+  dispatchedByUserId    String?
+  receivedByUserId      String?
+  cancelledByUserId     String?
+  rejectedByUserId      String?
+  status                TransferStatus @default(REQUESTED)
+  idempotencyKey        String?
+  notes                 String?
+  cancellationReason    String?
+  rejectionReason       String?
+  requestedAt           DateTime       @default(now())
+  approvedAt            DateTime?
+  packedAt              DateTime?
+  dispatchedAt          DateTime?
+  inTransitAt           DateTime?
+  receivedAt            DateTime?
+  cancelledAt           DateTime?
+  rejectedAt            DateTime?
+  metadata              Json?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  sourceFacility      Facility            @relation("TransferSourceFacility", fields: [sourceFacilityId], references: [id], onDelete: Restrict)
+  destinationFacility Facility            @relation("TransferDestinationFacility", fields: [destinationFacilityId], references: [id], onDelete: Restrict)
+  requestedBy         User?               @relation("TransferRequestedBy", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  approvedBy          User?               @relation("TransferApprovedBy", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  dispatchedBy        User?               @relation("TransferDispatchedBy", fields: [dispatchedByUserId], references: [id], onDelete: SetNull)
+  receivedBy          User?               @relation("TransferReceivedBy", fields: [receivedByUserId], references: [id], onDelete: SetNull)
+  cancelledBy         User?               @relation("TransferCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: SetNull)
+  rejectedBy          User?               @relation("TransferRejectedBy", fields: [rejectedByUserId], references: [id], onDelete: SetNull)
+  items               TransferItem[]
+  movements           InventoryMovement[]
+
+  @@unique([sourceFacilityId, idempotencyKey])
+  @@index([sourceFacilityId])
+  @@index([destinationFacilityId])
+  @@index([status])
+  @@index([requestedByUserId])
+  @@index([createdAt])
+}
+
+model TransferItem {
+  id           String    @id @default(uuid())
+  transferId   String
+  unitId       String
+  isActive     Boolean   @default(true)
+  dispatchedAt DateTime?
+  receivedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  transfer Transfer           @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  unit     BloodComponentUnit @relation(fields: [unitId], references: [id], onDelete: Restrict)
+
+  @@index([transferId])
+  @@index([unitId])
+  @@index([isActive])
+}
+
+enum NotificationType {
+  EMERGENCY_REQUEST
+  REQUEST_SUBMITTED
+  REQUEST_APPROVED
+  REQUEST_REJECTED
+  REQUEST_RESERVED
+  REQUEST_FULFILLED
+  ISSUANCE_CREATED
+  ISSUANCE_CONFIRMED
+  TRANSFER_REQUESTED
+  TRANSFER_APPROVED
+  TRANSFER_DISPATCHED
+  TRANSFER_RECEIVED
+  TRANSFER_REJECTED
+  TRANSFER_CANCELLED
+  SYSTEM
+}
+
+enum NotificationPriority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  SMS
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  SKIPPED
+}
+
+model Notification {
+  id           String               @id @default(uuid())
+  userId       String
+  facilityId   String?
+  type         NotificationType
+  priority     NotificationPriority @default(NORMAL)
+  title        String
+  body         String
+  resourceType String?
+  resourceId   String?
+  dedupeKey    String
+  metadata     Json?
+  readAt       DateTime?
+  expiresAt    DateTime?
+  createdAt    DateTime             @default(now())
+
+  user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  facility   Facility?              @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  deliveries NotificationDelivery[]
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+  @@index([facilityId])
+  @@index([type])
+}
+
+model NotificationDelivery {
+  id             String                     @id @default(uuid())
+  notificationId String
+  channel        NotificationChannel
+  status         NotificationDeliveryStatus @default(PENDING)
+  attempts       Int                        @default(0)
+  lastAttemptAt  DateTime?
+  deliveredAt    DateTime?
+  lastError      String?
+  createdAt      DateTime                   @default(now())
+  updatedAt      DateTime                   @updatedAt
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@unique([notificationId, channel])
+  @@index([status])
+}
+
+model NotificationPreference {
+  id        String              @id @default(uuid())
+  userId    String
+  type      NotificationType
+  channel   NotificationChannel
+  enabled   Boolean             @default(true)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type, channel])
+  @@index([userId])
 }

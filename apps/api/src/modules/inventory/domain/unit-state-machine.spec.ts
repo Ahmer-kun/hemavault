@@ -31,8 +31,9 @@ describe('inventory unit state machine', () => {
     expect(canTransition(UnitState.RESERVED, UnitState.RECALLED)).toBe(true);
   });
 
-  it('allows TRANSFER_PENDING -> IN_TRANSIT', () => {
+  it('allows TRANSFER_PENDING -> IN_TRANSIT and transfer cancellation/rejection back to AVAILABLE', () => {
     expect(canTransition(UnitState.TRANSFER_PENDING, UnitState.IN_TRANSIT)).toBe(true);
+    expect(canTransition(UnitState.TRANSFER_PENDING, UnitState.AVAILABLE)).toBe(true);
   });
 
   it('allows IN_TRANSIT -> RECEIVED', () => {
