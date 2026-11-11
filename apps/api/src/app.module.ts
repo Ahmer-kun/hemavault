@@ -24,6 +24,8 @@ import { DonationsModule } from './modules/donations/donations.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { RequestsModule } from './modules/requests/requests.module';
 import { IssuanceModule } from './modules/issuance/issuance.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
+import { TransfersModule } from './modules/transfers/transfers.module';
 
 @Module({
   imports: [
@@ -49,6 +51,8 @@ import { IssuanceModule } from './modules/issuance/issuance.module';
     DonationsModule,
     InventoryModule,
     RequestsModule,
+    NotificationsModule,
+    TransfersModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
